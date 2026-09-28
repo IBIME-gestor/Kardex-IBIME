@@ -1,0 +1,16 @@
+name: Deploy
+on:
+  push:
+    branches: [main]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy a Firebase
+        env:
+          SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          echo "$SA" > "$HOME/sa.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="$HOME/sa.json"
+          npx -y firebase-tools deploy --only hosting,firestore:rules --project "${{ vars.FIREBASE_PROJECT }}"
