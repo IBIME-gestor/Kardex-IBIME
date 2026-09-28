@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calificaciones IBIME</title>
+<style>
+:root{--p:#004080;--bad:#c62828;--bg:#f0f2f5}
+*{box-sizing:border-box}body{margin:0;font:15px system-ui,sans-serif;background:var(--bg);color:#222}
+header{background:var(--p);color:#fff;padding:12px 20px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+header b{margin-right:auto}nav{display:flex;gap:6px;flex-wrap:wrap}
+button{border:0;border-radius:8px;padding:8px 14px;cursor:pointer;background:#e3f2fd;color:var(--p);font-weight:600}
+button.p{background:var(--p);color:#fff}button:disabled{opacity:.5}
+nav button.on{background:#fff}
+main{max-width:1000px;margin:20px auto;padding:0 16px}
+input{padding:8px;border:1px solid #ccc;border-radius:8px;font:inherit}
+.fila{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0;background:#fff;padding:10px;border-radius:10px}
+.fila input{flex:1;min-width:140px}.fila .u{flex:3;min-width:220px}
+table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden}
+td,th{padding:8px;border-bottom:1px solid #eee;text-align:left}th{background:#f7f7f7}
+pre{white-space:pre-wrap;background:#fff;padding:12px;border-radius:10px}
+#login{text-align:center;margin-top:20vh}.msg{color:var(--bad)}
+</style></head>
+<body>
+<header><b>Calificaciones IBIME</b><nav id="nav"></nav><button id="out" hidden>Salir</button></header>
+<main id="main"><div id="login"><h2>Importación de calificaciones</h2>
+<button class="p" id="in">Entrar con cuenta @ibime.edu.mx</button><p class="msg" id="err"></p></div></main>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<script type="module" src="app.js"></script>
+</body></html>
