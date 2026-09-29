@@ -15,7 +15,7 @@ const TABS = {
   gruposES: { n: 'Grupos español', col: 'grupos', f: ['nombre'], fix: { tipo: 'ESPAÑOL' }, w: ['tipo', '==', 'ESPAÑOL'], key: 'nombre' },
   gruposEN: { n: 'Grupos inglés', col: 'grupos', f: ['nombre'], fix: { tipo: 'INGLES' }, w: ['tipo', '==', 'INGLES'], key: 'nombre' },
   asignaturas: { n: 'Asignaturas', col: 'asignaturas', f: ['nombre', 'tipo'], key: 'nombre', types: { tipo: ['ESPAÑOL', 'INGLES'] } },
-  alumnos: { n: 'Alumnos', col: 'alumnos', f: ['correo', 'nombre', 'matricula', 'grupos'], key: 'correo' },
+  alumnos: { n: 'Alumnos', col: 'alumnos', f: ['matricula', 'nombre', 'correo', 'grupoEspanol', 'grupoIngles', 'tutor'], key: 'correo' },
   asignaciones: { n: 'Asignaciones', col: 'asignaciones', f: ['docente', 'grupo', 'materia', 'tipo', 'url'], key: null },
   avance: { n: 'Avance', col: 'avance', f: ['docente', 'nombre', 'grupo', 'asignatura', 'filas', 'alumnos', 'url', 'estado'], key: null, def: { estado: 'CARGADO' } }
 };
@@ -182,11 +182,58 @@ function formFields(t, data={}){
     if(t.types?.[f]) return `<label>${f}<select id="n_${f}"><option value="">Selecciona</option>${options(t.types[f],v)}</select></label>`;
     if(f==='grupos') return `<label>${f}<input id="n_${f}" value="${esc(Array.isArray(v)?v.join(', '):v)}" placeholder="Separados por coma"></label>`;
     if(f==='estado') return `<label>${f}<select id="n_${f}">${options(['CARGADO','PENDIENTE','REVISAR','CORREGIDO'],String(v||'CARGADO').toUpperCase())}</select></label>`;
-    return `<label>${f}<input id="n_${f}" value="${esc(v)}" placeholder="${f}" ${data.id && t.key === f ? 'readonly' : ''}></label>`;
+    const label = ({grupoEspanol:'Grupo Español',grupoIngles:'Grupo Inglés',matricula:'Matrícula'}[f] || f);
+    return `<label>${label}<input id="n_${f}" value="${esc(v)}" placeholder="${label}" ${data.id && t.key === f ? 'readonly' : ''}></label>`;
   }).join('');
 }
 
-function esCargaMasiva(k) { return ['gruposES', 'gruposEN', 'asignaturas'].includes(k); }
+function esCargaMasiva(k) { return ['gruposES', 'gruposEN', 'asignaturas', 'alumnos'].includes(k); }
+function descargarPlantillaAlumnos() {
+  if (!window.XLSX) return alert('No se pudo cargar el generador de Excel. Recarga la página e inténtalo de nuevo.');
+  const headers = [['MATRICULA', 'NOMBRE', 'CORREO', 'GRUPO ESPAÑOL', 'GRUPO INGLES', 'TUTOR']];
+  const ws = XLSX.utils.aoa_to_sheet(headers);
+  ws['!cols'] = [{wch:16},{wch:30},{wch:32},{wch:18},{wch:18},{wch:30}];
+  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'ALUMNOS');
+  XLSX.writeFile(wb, 'PLANTILLA_ALUMNOS.xlsx');
+}
+
+function normalizarFilaAlumno(r) {
+  return {
+    matricula: String(r.matricula ?? '').trim(),
+    nombre: String(r.nombre ?? '').trim(),
+    correo: normEmail(r.correo),
+    grupoEspanol: String(r.grupoEspanol ?? '').trim(),
+    grupoIngles: String(r.grupoIngles ?? '').trim(),
+    tutor: String(r.tutor ?? '').trim()
+  };
+}
+
+function leerExcelAlumnos(file) {
+  return new Promise((resolve, reject) => {
+    if (!window.XLSX) return reject(new Error('No se pudo cargar el lector de Excel. Recarga la página.'));
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        const wb = XLSX.read(e.target.result, { type: 'array' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const data = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false });
+        const aliases = {
+          'MATRICULA':'matricula','NOMBRE':'nombre','CORREO':'correo','GRUPO ESPAÑOL':'grupoEspanol',
+          'GRUPO ESPANOL':'grupoEspanol','GRUPO INGLES':'grupoIngles','GRUPO INGLÉS':'grupoIngles','TUTOR':'tutor'
+        };
+        const rows = data.map(row => {
+          const x = {};
+          Object.entries(row).forEach(([key,val]) => { const clean = String(key).trim().toUpperCase(); if (aliases[clean]) x[aliases[clean]] = val; });
+          return normalizarFilaAlumno(x);
+        }).filter(r => r.matricula || r.nombre || r.correo);
+        resolve(rows);
+      } catch (err) { reject(err); }
+    };
+    reader.onerror = () => reject(new Error('No se pudo leer el archivo.'));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
 function normalizarCatalogo(k, value) { return String(value ?? '').trim().replace(/\s+/g, ' ').toUpperCase(); }
 
 function normalizarGuardado(obj) {
@@ -214,7 +261,10 @@ function parsearPegado(k, texto) {
   const rows = [];
   for (const linea of lineas) {
     const c = linea.split(sep).map(x => x.trim());
-    if (k === 'asignaturas') {
+    if (k === 'alumnos') {
+      if (/^matricula\s*(nombre|correo)/i.test(c[0] || '')) continue;
+      rows.push(normalizarFilaAlumno({matricula:c[0],nombre:c[1],correo:c[2],grupoEspanol:c[3],grupoIngles:c[4],tutor:c[5]}));
+    } else if (k === 'asignaturas') {
       if (!c[0]) continue;
       const tipo = c[1] || 'ESPAÑOL';
       if (/^(nombre|asignatura|materia)$/i.test(c[0]) && (!c[1] || /^(tipo|idioma)$/i.test(c[1]))) continue;
@@ -228,66 +278,52 @@ function parsearPegado(k, texto) {
   return rows;
 }
 
+function alumnoClave(r) { return `${String(r.matricula||'').trim().toUpperCase()}|${normEmail(r.correo)}`; }
+function alumnoDup(r, existing) {
+  const m = String(r.matricula||'').trim().toUpperCase(), c = normEmail(r.correo);
+  return existing.some(x => (m && String(x.matricula||'').trim().toUpperCase() === m) || (c && normEmail(x.correo) === c));
+}
+
 function renderBulkEditor(k, rows, existing) {
   const editor = $('bulkEditor');
-  const fields = k === 'asignaturas' ? ['nombre', 'tipo'] : ['nombre'];
-  const existingKeys = new Set(existing.map(r => normalizarCatalogo(k, r.nombre)));
+  const fields = k === 'asignaturas' ? ['nombre', 'tipo'] : k === 'alumnos' ? ['matricula','nombre','correo','grupoEspanol','grupoIngles','tutor'] : ['nombre'];
+  const labels = {matricula:'Matrícula',nombre:k==='asignaturas'?'Materia':'Nombre',correo:'Correo',grupoEspanol:'Grupo Español',grupoIngles:'Grupo Inglés',tutor:'Tutor',tipo:'Tipo'};
   const state = rows.map((r, i) => ({ ...r, _i: i, _remove: false }));
+  const duplicateFor = r => k === 'alumnos' ? alumnoDup(r, existing) : existing.some(x => normalizarCatalogo(k, x.nombre) === normalizarCatalogo(k, r.nombre));
+  const duplicatePasteFor = r => state.some(x => !x._remove && x._i !== r._i && (k === 'alumnos' ? ((r.matricula && String(x.matricula).trim().toUpperCase() === String(r.matricula).trim().toUpperCase()) || (r.correo && normEmail(x.correo) === normEmail(r.correo))) : normalizarCatalogo(k, x.nombre) === normalizarCatalogo(k, r.nombre)));
   const body = () => state.filter(r => !r._remove).map(r => {
-    const duplicateExisting = existingKeys.has(normalizarCatalogo(k, r.nombre));
-    const duplicatePaste = state.some(x => !x._remove && x._i !== r._i && normalizarCatalogo(k, x.nombre) === normalizarCatalogo(k, r.nombre));
-    const duplicate = duplicateExisting || duplicatePaste;
-    const motivo = duplicateExisting ? 'YA EXISTE' : (duplicatePaste ? 'REPETIDA EN EL PEGADO' : '');
+    const duplicateExisting = duplicateFor(r), duplicatePaste = duplicatePasteFor(r), duplicate = duplicateExisting || duplicatePaste;
+    const motivo = duplicateExisting ? 'YA EXISTE' : (duplicatePaste ? 'REPETIDA EN EL PEGADO/ARCHIVO' : '');
     return `<tr class="bulk-row ${duplicate ? 'duplicate' : ''}" data-i="${r._i}">
-      <td>${r._i + 1}</td>
-      ${fields.map(f => `<td><input class="bulk-input" data-f="${f}" value="${esc(r[f] || '')}" ${f === 'tipo' ? 'list="tipos-materia"' : ''}></td>`).join('')}
-      <td>${duplicate ? `<span class="bulk-warning">⚠ ${esc(motivo)}</span>` : '<span class="bulk-ok">✓ NUEVO</span>'}</td>
-      <td><button type="button" class="danger bulk-remove" data-i="${r._i}">Eliminar</button></td>
-    </tr>`;
+      <td>${r._i + 1}</td>${fields.map(f => `<td><input class="bulk-input" data-f="${f}" value="${esc(r[f] || '')}" ${f === 'tipo' ? 'list="tipos-materia"' : ''}></td>`).join('')}
+      <td>${duplicate ? `<span class="bulk-warning">⚠ ${esc(motivo)}</span>` : '<span class="bulk-ok">✓ NUEVO' + (k==='alumnos' ? ' · LISTO' : '') + '</span>'}</td><td><button type="button" class="danger bulk-remove" data-i="${r._i}">Eliminar</button></td></tr>`;
   }).join('');
-  editor.innerHTML = `<div class="bulk-head"><div><h3>Revisar pegado</h3><p>${state.filter(r => !r._remove).length} fila(s). Las filas marcadas en amarillo ya existen o están repetidas.</p></div><div class="actions"><button type="button" id="bulkCancelar">Cancelar</button><button type="button" class="p" id="bulkGuardar">CONFIRMAR Y GUARDAR TODO</button></div></div>
-    <datalist id="tipos-materia"><option value="ESPAÑOL"><option value="INGLES"></datalist>
-    <div class="table-wrap"><table class="bulk-table"><thead><tr><th>#</th>${fields.map(f => `<th>${f === 'nombre' ? (k === 'asignaturas' ? 'Materia' : 'Grupo') : 'Tipo'}</th>`).join('')}<th>Estado</th><th>Acción</th></tr></thead><tbody>${body() || '<tr><td colspan="6" class="empty">No hay filas para guardar.</td></tr>'}</tbody></table></div>`;
+  editor.innerHTML = `<div class="bulk-head"><div><h3>Revisar ${k==='alumnos'?'alumnos':'filas'}</h3><p>${state.filter(r => !r._remove).length} fila(s). Las filas amarillas ya existen o están repetidas.</p></div><div class="actions"><button type="button" id="bulkCancelar">Cancelar</button><button type="button" class="p" id="bulkGuardar">CONFIRMAR Y GUARDAR TODO</button></div></div>
+    ${k==='asignaturas' ? '<datalist id="tipos-materia"><option value="ESPAÑOL"><option value="INGLES"></datalist>' : ''}
+    <div class="table-wrap"><table class="bulk-table"><thead><tr><th>#</th>${fields.map(f => `<th>${labels[f] || f}</th>`).join('')}<th>Estado</th><th>Acción</th></tr></thead><tbody>${body() || '<tr><td colspan="10" class="empty">No hay filas para guardar.</td></tr>'}</tbody></table></div>`;
   editor.hidden = false;
-
-  const refresh = () => {
-    state.forEach(r => {
-      const row = editor.querySelector(`tr[data-i="${r._i}"]`);
-      if (!row) return;
-      row.querySelectorAll('.bulk-input').forEach(inp => r[inp.dataset.f] = inp.value.trim());
-    });
-    renderBulkEditor(k, state, existing);
-  };
   editor.querySelectorAll('.bulk-input').forEach(inp => inp.oninput = () => {
     const r = state.find(x => String(x._i) === inp.closest('tr').dataset.i); if (r) r[inp.dataset.f] = inp.value.trim();
-    const duplicateExisting = existingKeys.has(normalizarCatalogo(k, r.nombre));
-    const duplicatePaste = state.some(x => !x._remove && x._i !== r._i && normalizarCatalogo(k, x.nombre) === normalizarCatalogo(k, r.nombre));
-    const tr = inp.closest('tr'); const status = tr.querySelector('td:nth-last-child(2)');
-    tr.classList.toggle('duplicate', duplicateExisting || duplicatePaste);
-    status.innerHTML = duplicateExisting ? '<span class="bulk-warning">⚠ YA EXISTE</span>' : duplicatePaste ? '<span class="bulk-warning">⚠ REPETIDA EN EL PEGADO</span>' : '<span class="bulk-ok">✓ NUEVO</span>';
+    const duplicate = duplicateFor(r) || duplicatePasteFor(r), tr = inp.closest('tr'), status = tr.querySelector('td:nth-last-child(2)');
+    tr.classList.toggle('duplicate', duplicate); status.innerHTML = duplicate ? '<span class="bulk-warning">⚠ DUPLICADO</span>' : '<span class="bulk-ok">✓ NUEVO</span>';
   });
   editor.querySelectorAll('.bulk-remove').forEach(btn => btn.onclick = () => { const r = state.find(x => String(x._i) === btn.dataset.i); if (r) r._remove = true; renderBulkEditor(k, state, existing); });
   $('bulkCancelar').onclick = () => { editor.hidden = true; };
   $('bulkGuardar').onclick = async () => {
-    const valid = state.filter(r => !r._remove && r.nombre.trim());
+    const valid = state.filter(r => !r._remove).map(r => k==='alumnos' ? normalizarFilaAlumno(r) : r).filter(r => k==='alumnos' ? (r.matricula && r.nombre && r.correo) : r.nombre.trim());
     if (!valid.length) return alert('No hay filas válidas para guardar.');
     const finalKeys = new Set();
     for (const r of valid) {
-      const key = normalizarCatalogo(k, r.nombre);
-      if (existingKeys.has(key)) return alert(`La fila "${r.nombre}" todavía está marcada como duplicada. Edítala o elimínala antes de guardar.`);
-      if (finalKeys.has(key)) return alert(`La materia/grupo "${r.nombre}" está repetida en el pegado. Edítala o elimínala antes de guardar.`);
+      const key = k==='alumnos' ? alumnoClave(r) : normalizarCatalogo(k, r.nombre);
+      if (duplicateFor(r)) return alert(`La fila "${r.nombre || r.matricula}" todavía está marcada como duplicada. Edítala o elimínala antes de guardar.`);
+      if (finalKeys.has(key)) return alert(`La fila "${r.nombre || r.matricula}" está repetida en el archivo. Edítala o elimínala antes de guardar.`);
       finalKeys.add(key);
       if (k === 'asignaturas' && !['ESPAÑOL', 'INGLES'].includes(String(r.tipo).toUpperCase())) return alert(`Tipo inválido en "${r.nombre}". Usa Español o Ingles.`);
+      if (k === 'alumnos' && !/^\S+@\S+\.\S+$/.test(r.correo)) return alert(`Correo inválido en la matrícula ${r.matricula}.`);
     }
     $('bulkGuardar').disabled = true;
-    try {
-      await guardar(TABS[k], valid.map(r => ({ nombre: r.nombre, ...(k === 'asignaturas' ? { tipo: String(r.tipo).trim().toUpperCase() } : {}) })));
-      editor.hidden = true;
-      vistaTab(k);
-    } catch (e) {
-      alert('No se pudieron guardar las filas: ' + e.message);
-      $('bulkGuardar').disabled = false;
-    }
+    try { await guardar(TABS[k], valid); editor.hidden = true; vistaTab(k); }
+    catch (e) { alert('No se pudieron guardar las filas: ' + e.message); $('bulkGuardar').disabled = false; }
   };
 }
 
@@ -297,8 +333,9 @@ async function vistaTab(k){
   if(k==='gruposES') rows=rows.filter(r=>String(r.tipo||'').toUpperCase()==='ESPAÑOL');
   if(k==='gruposEN') rows=rows.filter(r=>String(r.tipo||'').toUpperCase()==='INGLES');
   const bulk = esCargaMasiva(k);
-  main.innerHTML=`<div class="section-head"><div><h2>${t.n}</h2><p>${bulk ? 'Agrega una por una o pega directamente varias filas copiadas de Google Sheets. Revisa todo antes de guardar.' : 'Agrega, edita y completa la información. Los cambios se guardan en Firestore.'}</p></div><div class="actions"><button class="p" id="nuevo">+ Nuevo</button>${bulk ? '<button id="pegarMasivo">Pegar desde Sheets</button>' : ''}</div></div>
-    ${bulk ? `<div id="bulkPaste" class="bulk-paste" hidden><label>Pega aquí las filas copiadas de Google Sheets<textarea id="pasteArea" rows="7" placeholder="${k === 'asignaturas' ? 'Materia<TAB>Tipo\nMATEMÁTICAS<TAB>ESPAÑOL\nENGLISH<TAB>INGLES' : 'Grupo\n1A\n1B\n2A'}"></textarea></label><div class="actions"><button id="procesarPegado" class="p">PREVISUALIZAR FILAS</button><button id="cancelarPegado">Cancelar</button></div></div><div id="bulkEditor" class="editor" hidden></div>` : '<div id="editor" class="editor" hidden></div>'}
+  const alumnoBulk = k === 'alumnos';
+  main.innerHTML=`<div class="section-head"><div><h2>${t.n}</h2><p>${bulk ? (alumnoBulk ? 'Carga tu Excel o descarga la plantilla oficial. Revisa todos los alumnos antes de guardarlos.' : 'Agrega una por una o pega directamente varias filas copiadas de Google Sheets. Revisa todo antes de guardar.') : 'Agrega, edita y completa la información. Los cambios se guardan en Firestore.'}</p></div><div class="actions"><button class="p" id="nuevo">+ Nuevo</button>${alumnoBulk ? '<button id="plantillaAlumnos">DESCARGAR PLANTILLA EXCEL</button><label class="button-file" for="excelAlumnos">SUBIR EXCEL</label><input id="excelAlumnos" type="file" accept=".xlsx,.xls" hidden>' : bulk ? '<button id="pegarMasivo">Pegar desde Sheets</button>' : ''}</div></div>
+    ${bulk ? `<div id="bulkPaste" class="bulk-paste" hidden><label>${alumnoBulk ? 'También puedes pegar las 6 columnas desde Excel/Sheets' : 'Pega aquí las filas copiadas de Google Sheets'}<textarea id="pasteArea" rows="7" placeholder="${alumnoBulk ? 'MATRICULA<TAB>NOMBRE<TAB>CORREO<TAB>GRUPO ESPAÑOL<TAB>GRUPO INGLES<TAB>TUTOR' : k === 'asignaturas' ? 'Materia<TAB>Tipo\nMATEMÁTICAS<TAB>ESPAÑOL\nENGLISH<TAB>INGLES' : 'Grupo\n1A\n1B\n2A'}"></textarea></label><div class="actions"><button id="procesarPegado" class="p">PREVISUALIZAR FILAS</button><button id="cancelarPegado">Cancelar</button></div></div><div id="bulkEditor" class="editor" hidden></div>` : '<div id="editor" class="editor" hidden></div>'}
     <div class="tools"><input id="buscar" placeholder="Buscar..."><button id="recargar">Actualizar</button></div>
     <div class="table-wrap"><table><tr>${t.f.map(f=>`<th>${f}</th>`).join('')}<th>Acciones</th></tr>${rows.map(r=>`<tr>${t.f.map(f=>`<td>${esc(Array.isArray(r[f])?r[f].join(', '):r[f])}</td>`).join('')}<td class="actions"><button data-edit="${esc(r.id)}">Editar</button><button class="danger" data-del="${esc(r.id)}">Borrar</button></td></tr>`).join('')}</table></div>`;
   const editor=$('editor');
@@ -307,9 +344,15 @@ async function vistaTab(k){
   };
   $('nuevo').onclick=()=>openEditor();
   if(bulk){
-    $('pegarMasivo').onclick=()=>{$('bulkPaste').hidden=!$('bulkPaste').hidden;if(!$('bulkPaste').hidden){$('pasteArea').focus();}};
+    if(alumnoBulk){
+      $('plantillaAlumnos').onclick=descargarPlantillaAlumnos;
+      $('excelAlumnos').onchange=async e=>{const file=e.target.files?.[0];if(!file)return;try{const parsed=await leerExcelAlumnos(file);if(!parsed.length)return alert('No encontré filas válidas. Verifica que el Excel tenga las columnas: MATRICULA, NOMBRE, CORREO, GRUPO ESPAÑOL, GRUPO INGLES y TUTOR.');renderBulkEditor(k,parsed,rows);}catch(err){alert('No se pudo leer el Excel: '+err.message);}e.target.value='';};
+      $('bulkPaste').hidden=false;
+    } else {
+      $('pegarMasivo').onclick=()=>{$('bulkPaste').hidden=!$('bulkPaste').hidden;if(!$('bulkPaste').hidden){$('pasteArea').focus();}};
+    }
     $('cancelarPegado').onclick=()=>{$('bulkPaste').hidden=true;$('pasteArea').value='';};
-    $('procesarPegado').onclick=()=>{const parsed=parsearPegado(k,$('pasteArea').value);if(!parsed.length)return alert('No encontré filas válidas. Copia las filas directamente desde Google Sheets y pégalas aquí.');renderBulkEditor(k,parsed,rows);};
+    $('procesarPegado').onclick=()=>{const parsed=parsearPegado(k,$('pasteArea').value);if(!parsed.length)return alert('No encontré filas válidas.');renderBulkEditor(k,parsed,rows);};
     $('pasteArea').addEventListener('paste',()=>setTimeout(()=>{const parsed=parsearPegado(k,$('pasteArea').value);if(parsed.length)renderBulkEditor(k,parsed,rows);},50));
   }
   main.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openEditor(rows.find(r=>r.id===b.dataset.edit)));
