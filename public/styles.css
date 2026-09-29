@@ -1,0 +1,99 @@
+:root{
+  --brand:#0b4f8a;
+  --brand-2:#0f72bd;
+  --brand-dark:#07345c;
+  --accent:#25a7a0;
+  --bg:#f4f7fb;
+  --surface:#ffffff;
+  --surface-2:#eef5fb;
+  --text:#172033;
+  --muted:#667085;
+  --border:#e2e8f0;
+  --success:#16805b;
+  --warning:#b7791f;
+  --danger:#c53d4f;
+  --shadow:0 10px 30px rgba(15,45,75,.08);
+  --shadow-sm:0 4px 14px rgba(15,45,75,.07);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+body:before{content:"";position:fixed;inset:0 0 auto 0;height:230px;background:linear-gradient(135deg,#07345c 0%,#0b4f8a 55%,#0b718b 100%);z-index:-1}
+button,input,select{font:inherit}
+button{border:1px solid transparent;border-radius:10px;padding:10px 15px;cursor:pointer;background:#edf2f7;color:var(--brand-dark);font-weight:700;transition:.18s ease;box-shadow:none}
+button:hover{transform:translateY(-1px);box-shadow:var(--shadow-sm)}
+button:active{transform:translateY(0)}
+button:disabled{opacity:.5;cursor:not-allowed;transform:none;box-shadow:none}
+button.p{background:linear-gradient(135deg,var(--brand),var(--brand-2));color:#fff}
+button.danger{background:#fff0f2;color:var(--danger);border-color:#ffd6dc}
+header{position:sticky;top:0;z-index:20;min-height:76px;padding:12px clamp(14px,3vw,34px);display:flex;align-items:center;gap:18px;background:rgba(7,52,92,.93);backdrop-filter:blur(14px);color:#fff;border-bottom:1px solid rgba(255,255,255,.12);box-shadow:0 8px 30px rgba(0,0,0,.12)}
+header>b{font-size:20px;letter-spacing:-.3px;white-space:nowrap;display:flex;align-items:center;gap:10px}
+header>b:before{content:"K";display:grid;place-items:center;width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,#35c5bc,#1c91d2);color:#fff;font-size:16px;box-shadow:0 5px 15px rgba(0,0,0,.18)}
+header:after{content:"Portal académico";position:absolute;left:62px;top:50px;font-size:10px;letter-spacing:.6px;text-transform:uppercase;color:rgba(255,255,255,.58)}
+nav{display:flex;gap:7px;flex:1;overflow-x:auto;scrollbar-width:none;padding:2px 0}
+nav::-webkit-scrollbar{display:none}
+nav button{position:relative;background:rgba(255,255,255,.1);border-color:rgba(255,255,255,.08);color:#eaf5ff;padding:9px 13px;border-radius:10px;font-size:13px;white-space:nowrap}
+nav button:hover{background:rgba(255,255,255,.18)}
+nav button.on{background:#fff;color:var(--brand-dark);box-shadow:0 5px 16px rgba(0,0,0,.14)}
+nav button[data-k="dashboard"]:before{content:"⌂"}
+nav button[data-k="importar"]:before{content:"↥"}
+nav button[data-k="docentes"]:before{content:"♙"}
+nav button[data-k="gruposES"]:before{content:"ES"}
+nav button[data-k="gruposEN"]:before{content:"EN"}
+nav button[data-k="asignaturas"]:before{content:"▦"}
+nav button[data-k="alumnos"]:before{content:"♙"}
+nav button[data-k="asignaciones"]:before{content:"⇄"}
+nav button[data-k="avance"]:before{content:"◔"}
+nav button[data-k="misAsignaciones"]:before{content:"⇄"}
+nav button[data-k="miAvance"]:before{content:"◔"}
+nav button:before{display:inline-block;margin-right:6px;font-size:11px;font-weight:800;opacity:.8}
+#out{background:rgba(255,255,255,.08);color:#fff;border-color:rgba(255,255,255,.15);white-space:nowrap}
+#out:hover{background:#fff;color:var(--brand-dark)}
+main{width:min(1240px,calc(100% - 32px));margin:30px auto 60px;padding:0}
+main>h2,.section-head h2{color:#fff;font-size:28px;letter-spacing:-.7px;margin:0 0 18px}
+main>p{color:#dbeafe}
+.section-head{display:flex;justify-content:space-between;gap:18px;align-items:end;margin-bottom:18px}
+.section-head p{color:#e1edf8;margin:0;line-height:1.5}
+.section-head>div{min-width:0}
+.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:15px;margin:18px 0 24px}
+.cards>div{position:relative;background:var(--surface);padding:20px 20px 18px;border-radius:17px;border:1px solid rgba(226,232,240,.9);box-shadow:var(--shadow);overflow:hidden}
+.cards>div:after{content:"";position:absolute;right:-24px;top:-28px;width:88px;height:88px;border-radius:50%;background:linear-gradient(135deg,rgba(15,114,189,.12),rgba(37,167,160,.1))}
+.cards b{display:block;font-size:31px;line-height:1;color:var(--brand-dark);letter-spacing:-1px;margin-bottom:8px}
+.cards span{display:block;color:var(--muted);font-size:13px;font-weight:700}
+.perfil{display:flex;align-items:center;gap:15px;background:rgba(255,255,255,.96);padding:17px 20px;border-radius:17px;border:1px solid var(--border);box-shadow:var(--shadow);margin-bottom:20px}
+.perfil img{width:58px;height:58px;border-radius:50%;object-fit:cover;border:3px solid #e5f3fb}
+.perfil h2{margin:0 0 3px;color:var(--text);font-size:19px}
+.perfil p{margin:0;color:var(--muted)}
+.editor,.fila,.empty,.tools,.table-wrap,pre{background:var(--surface);border:1px solid var(--border);box-shadow:var(--shadow-sm)}
+.editor{padding:20px;border-radius:17px;margin:14px 0}
+.editor h3{margin:0 0 16px;color:var(--brand-dark);font-size:18px}
+.form-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-bottom:16px}
+label{display:flex;flex-direction:column;gap:7px;font-size:12px;font-weight:800;color:#475467;text-transform:uppercase;letter-spacing:.35px}
+input,select{width:100%;padding:11px 12px;border:1px solid #d8e0ea;border-radius:10px;background:#fff;color:var(--text);outline:none;transition:.15s}
+input:focus,select:focus{border-color:#63a8d7;box-shadow:0 0 0 3px rgba(15,114,189,.1)}
+.tools{display:flex;gap:10px;padding:12px;border-radius:14px;margin:14px 0}
+.tools input{flex:1}
+.fila{display:grid;grid-template-columns:130px 1fr 1fr minmax(250px,2fr) auto;gap:9px;align-items:end;padding:12px;border-radius:13px;margin:9px 0}
+.fila input,.fila select{min-width:0}
+.fila .u{min-width:0}
+.acciones,.actions{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}
+.actions button{font-size:12px;padding:8px 11px}
+.table-wrap{overflow:auto;border-radius:16px}
+table{width:100%;border-collapse:separate;border-spacing:0;background:var(--surface);min-width:680px}
+th,td{padding:13px 14px;border-bottom:1px solid #edf1f5;text-align:left;vertical-align:middle}
+th{background:#f7fafc;color:#526174;font-size:11px;text-transform:uppercase;letter-spacing:.5px;position:sticky;top:0;z-index:1}
+td{font-size:13px;color:#344054}
+tbody tr:hover,table tr:not(:first-child):hover{background:#f8fbfe}
+td:first-child{font-weight:700;color:#1d3650}
+pre{white-space:pre-wrap;padding:15px;border-radius:13px;min-height:50px;color:#3b4a5c;line-height:1.55;overflow:auto}
+.empty{padding:34px;border-radius:16px;color:var(--muted);text-align:center}
+.msg{color:#b42318;background:#fff0f0;border:1px solid #ffd1d1;padding:10px 12px;border-radius:10px;display:inline-block}
+#login{width:min(480px,100%);margin:12vh auto 0;text-align:center;background:rgba(255,255,255,.97);padding:36px;border-radius:24px;box-shadow:0 20px 60px rgba(0,0,0,.15);border:1px solid rgba(255,255,255,.65)}
+#login h2{color:var(--brand-dark);font-size:27px;margin:0 0 8px}
+#login:before{content:"IBIME";display:inline-grid;place-items:center;width:72px;height:72px;border-radius:22px;background:linear-gradient(135deg,var(--brand),var(--accent));color:#fff;font-weight:900;letter-spacing:1px;margin-bottom:15px;box-shadow:0 12px 28px rgba(11,79,138,.25)}
+#login p:not(.msg){color:var(--muted)}
+a{color:var(--brand-2);font-weight:700;text-decoration:none}a:hover{text-decoration:underline}
+.badge{display:inline-flex;align-items:center;gap:5px;padding:5px 9px;border-radius:999px;background:#eaf8f2;color:var(--success);font-size:11px;font-weight:800}
+@media(max-width:1000px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.form-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.fila{grid-template-columns:1fr 1fr}.fila .u{grid-column:1/-1}}
+@media(max-width:760px){body:before{height:170px}header{align-items:flex-start;flex-wrap:wrap;padding:12px 14px}header>b{width:100%}header:after{left:58px;top:49px}nav{order:3;flex-basis:100%;padding-bottom:2px}#out{position:absolute;right:14px;top:12px}main{width:min(100% - 20px,1240px);margin-top:22px}.section-head{align-items:flex-start;flex-direction:column}.section-head h2,main>h2{font-size:23px}.cards{grid-template-columns:1fr 1fr}.form-grid{grid-template-columns:1fr}.fila{grid-template-columns:1fr}.fila .u{grid-column:auto}}
+@media(max-width:460px){.cards{grid-template-columns:1fr}.cards b{font-size:27px}#login{padding:28px 20px;margin-top:9vh}}
