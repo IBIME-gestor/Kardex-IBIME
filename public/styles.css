@@ -157,3 +157,51 @@ body:has(#login) .site-footer{display:none;}
 .import-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.file-btn{display:inline-flex!important;flex-direction:row!important;align-items:center;justify-content:center;background:var(--brand);color:#fff!important;border:1px solid var(--brand);padding:10px 14px;border-radius:10px;cursor:pointer;text-transform:none!important;letter-spacing:0!important;font-size:12px!important}.file-btn:hover{filter:brightness(1.08)}
 #alumnosPreview{margin:18px 0}.preview-head{display:flex;justify-content:space-between;gap:18px;align-items:center;margin:16px 0 10px}.preview-head h3{color:#fff;margin:0 0 4px}.preview-head p{color:#dceaf4;margin:0;font-size:12px}.preview-table{max-height:65vh}.preview-table table{min-width:1250px}.preview-table td input{min-width:145px;padding:8px 9px;font-size:12px}.preview-table td:nth-child(2) input{min-width:105px}.preview-table td:nth-child(4) input{min-width:220px}.preview-table .row-warning{background:#fff8df}.preview-table .row-warning:hover{background:#fff3c2}.status{display:inline-flex;align-items:center;padding:4px 8px;border-radius:999px;font-size:10px;font-weight:900;letter-spacing:.4px}.status.nuevo{background:#e8f7ef;color:#16794c}.status.duplicado{background:#ffe0df;color:#a92323}.status.revisar{background:#fff0c2;color:#8a5a00}.reason{display:block;max-width:180px;color:#8a5a00;font-size:10px;line-height:1.25;margin-top:5px}.preview-table .actions{margin:0}.preview-table th:first-child{min-width:150px}
 @media(max-width:760px){.import-tools,.preview-head{align-items:flex-start;flex-direction:column}.import-actions{width:100%}.import-actions button,.file-btn{flex:1}.preview-table{max-height:none}}
+
+/* ===== Mayor contraste para el panel del docente ===== */
+body:not(:has(#login)) header{
+  background:linear-gradient(135deg,#062b4d 0%,#07345c 58%,#0a5d88 100%);
+  color:#fff;
+  border-bottom:1px solid rgba(255,255,255,.16);
+  box-shadow:0 10px 35px rgba(2,25,45,.24);
+}
+body:not(:has(#login)) .brand{color:#fff}
+body:not(:has(#login)) .brand-logo{
+  background:#fff;
+  border-radius:10px;
+  padding:5px 9px;
+  box-shadow:0 3px 12px rgba(0,0,0,.18);
+}
+body:not(:has(#login)) .brand-copy{border-left-color:rgba(255,255,255,.30)}
+body:not(:has(#login)) .brand-copy strong{color:#fff}
+body:not(:has(#login)) .brand-copy small{color:#d7e8f4}
+body:not(:has(#login)) nav button{
+  background:rgba(255,255,255,.12);
+  border-color:rgba(255,255,255,.22);
+  color:#fff;
+}
+body:not(:has(#login)) nav button:hover{
+  background:rgba(255,255,255,.21);
+  border-color:rgba(255,255,255,.36);
+}
+body:not(:has(#login)) nav button.on{
+  background:#fff;
+  color:#07345c;
+  border-color:#fff;
+  box-shadow:0 6px 18px rgba(0,0,0,.18);
+}
+body:not(:has(#login)) #out,
+body:not(:has(#login)) .install-btn{
+  background:rgba(255,255,255,.12);
+  color:#fff;
+  border-color:rgba(255,255,255,.25);
+}
+body:not(:has(#login)) #out:hover,
+body:not(:has(#login)) .install-btn:hover{
+  background:#fff;
+  color:#07345c;
+  border-color:#fff;
+}
+@media(max-width:820px){
+  body:not(:has(#login)) header{background:linear-gradient(135deg,#062b4d,#0a5d88)}
+}
