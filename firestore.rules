@@ -1,36 +1,72 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{db}/documents {
-    function em() { return request.auth.token.email.lower(); }
-    function dom() { return request.auth != null && em().matches('.*@ibime[.]edu[.]mx'); }
-    function admin() {
-      return dom() && (em() == 'josue.jain@ibime.edu.mx' ||
-        get(/databases/$(db)/documents/docentes/$(em())).data.rol == 'admin');
+    function signedIn() { return request.auth != null; }
+    function em() { return signedIn() ? request.auth.token.email.lower() : ''; }
+    function dom() { return signedIn() && em().matches('.*@ibime[.]edu[.]mx'); }
+    function isAdminEmail() { return dom() && em() == 'josue.jain@ibime.edu.mx'; }
+    function isStoredAdmin() {
+      return dom() && exists(/databases/$(db)/documents/docentes/$(em()))
+        && get(/databases/$(db)/documents/docentes/$(em())).data.rol == 'admin';
     }
-    function docente() { return dom() && exists(/databases/$(db)/documents/docentes/$(em())); }
+    function admin() { return isAdminEmail() || isStoredAdmin(); }
+    function docente() {
+      return dom() && exists(/databases/$(db)/documents/docentes/$(em()))
+        && get(/databases/$(db)/documents/docentes/$(em())).data.rol in ['docente', 'admin'];
+    }
+    function ownDocente(id) { return dom() && em() == id; }
 
     match /docentes/{id} {
-      allow get: if admin() || (dom() && em() == id);
-      allow list: if admin();
+      // El admin puede administrar completamente esta colección.
+      allow read, write: if admin();
+      allow get: if ownDocente(id);
+      // Alta automática de un usuario nuevo: solo puede crearse a sí mismo como docente.
+      allow create: if ownDocente(id)
+        && request.resource.data.rol == 'docente'
+        && request.resource.data.correo == id;
+      // Un docente no puede modificar su rol ni convertir su cuenta en admin.
+      allow update: if ownDocente(id)
+        && resource.data.rol == 'docente'
+        && request.resource.data.rol == 'docente'
+        && request.resource.data.correo == id;
+      allow delete: if admin();
+    }
+
+    match /grupos/{id} {
+      allow read: if docente() || admin();
       allow write: if admin();
     }
-    match /{col}/{id} {
-      allow read: if col in ['grupos','asignaturas','alumnos'] && (docente() || admin());
-      allow write: if col in ['grupos','asignaturas','alumnos'] && admin();
+    match /asignaturas/{id} {
+      allow read: if docente() || admin();
+      allow write: if admin();
     }
+    match /alumnos/{id} {
+      allow read: if docente() || admin();
+      allow write: if admin();
+    }
+
     match /asignaciones/{id} {
       allow read: if admin() || (docente() && resource.data.docente == em());
-      allow write: if admin();
+      allow create: if admin() || (docente() && request.resource.data.docente == em());
+      allow update: if admin() || (docente() && resource.data.docente == em() && request.resource.data.docente == em());
+      allow delete: if admin() || (docente() && resource.data.docente == em());
     }
+
     match /calificaciones/{id} {
-      allow read: if admin();
-      allow write: if admin() || (docente() && request.resource.data.docente == em()
+      allow read: if admin() || (docente() && resource.data.docente == em());
+      allow create, update: if admin() || (
+        docente() && request.resource.data.docente == em()
         && request.resource.data.calif is number
-        && request.resource.data.calif >= 0 && request.resource.data.calif <= 10);
+        && request.resource.data.calif >= 0
+        && request.resource.data.calif <= 10
+      );
+      allow delete: if admin();
     }
+
     match /avance/{id} {
       allow read: if admin() || (docente() && resource.data.docente == em());
-      allow write: if admin() || (docente() && request.resource.data.docente == em());
+      allow create, update: if admin() || (docente() && request.resource.data.docente == em());
+      allow delete: if admin() || (docente() && resource.data.docente == em());
     }
   }
 }
