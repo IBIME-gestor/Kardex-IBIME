@@ -17,14 +17,11 @@ service cloud.firestore {
     function ownDocente(id) { return dom() && em() == id; }
 
     match /docentes/{id} {
-      // El admin puede administrar completamente esta colección.
       allow read, write: if admin();
       allow get: if ownDocente(id);
-      // Alta automática de un usuario nuevo: solo puede crearse a sí mismo como docente.
       allow create: if ownDocente(id)
         && request.resource.data.rol == 'docente'
         && request.resource.data.correo == id;
-      // Un docente no puede modificar su rol ni convertir su cuenta en admin.
       allow update: if ownDocente(id)
         && resource.data.rol == 'docente'
         && request.resource.data.rol == 'docente'
@@ -42,7 +39,11 @@ service cloud.firestore {
     }
     match /alumnos/{id} {
       allow read: if docente() || admin();
-      allow write: if admin();
+      allow create, update: if admin() || (
+        docente() && request.resource.data.correo == id
+        && request.resource.data.ultimoDocente == em()
+      );
+      allow delete: if admin();
     }
 
     match /asignaciones/{id} {
