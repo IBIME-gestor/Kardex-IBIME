@@ -1,9 +1,73 @@
 <!DOCTYPE html>
-<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Calificaciones IBIME</title>
-<link rel="stylesheet" href="styles.css"></head>
+<html lang="es-MX">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#07345c">
+  <meta name="description" content="Portal académico de calificaciones IBIME.">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="IBIME">
+  <link rel="icon" type="image/png" sizes="64x64" href="assets/favicon-64.png">
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="styles.css">
+  <title>Calificaciones IBIME</title>
+</head>
 <body>
-<header><b>Calificaciones IBIME</b><nav id="nav"></nav><button id="out" hidden>Salir</button></header>
-<main id="main"><div id="login"><h2>Importación de calificaciones</h2><button class="p" id="in">Entrar con cuenta @ibime.edu.mx</button><p class="msg" id="err"></p></div></main>
-<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script><script type="module" src="app.js"></script>
-</body></html>
+  <header>
+    <a class="brand" href="#" aria-label="IBIME - Inicio" onclick="return false;">
+      <img src="assets/logo-ibime.png" alt="IBIME" class="brand-logo">
+      <span class="brand-copy"><strong>Calificaciones</strong><small>Portal académico IBIME</small></span>
+    </a>
+    <nav id="nav" aria-label="Navegación principal"></nav>
+    <div class="header-actions">
+      <button id="installApp" class="install-btn" type="button" hidden>Instalar app</button>
+      <button id="out" hidden>Salir</button>
+    </div>
+  </header>
+
+  <main id="main">
+    <section id="login" class="login-card">
+      <div class="login-logo-wrap"><img src="assets/logo-ibime.png" alt="Instituto Bíblico México" class="login-logo"></div>
+      <span class="eyebrow">PORTAL ACADÉMICO</span>
+      <h1>Calificaciones IBIME</h1>
+      <p class="login-lead">Gestiona reportes, grupos, alumnos y avance académico desde un solo lugar.</p>
+      <button class="google-btn" id="in" type="button">
+        <span class="google-icon" aria-hidden="true">G</span>
+        <span>Continuar con Google</span>
+      </button>
+      <p class="login-note">Acceso exclusivo para cuentas institucionales <strong>@ibime.edu.mx</strong></p>
+      <p class="msg" id="err" role="alert"></p>
+      <button id="installLogin" class="install-link" type="button" hidden>Instalar Calificaciones IBIME en este dispositivo</button>
+    </section>
+  </main>
+
+  <footer class="site-footer"><span>IBIME</span><span>•</span><span>Portal de Calificaciones</span></footer>
+
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+  <script type="module" src="app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
+    }
+    let deferredInstallPrompt = null;
+    const showInstall = () => {
+      ['installApp','installLogin'].forEach(id => { const el = document.getElementById(id); if (el) el.hidden = false; });
+    };
+    window.addEventListener('beforeinstallprompt', event => {
+      event.preventDefault(); deferredInstallPrompt = event; showInstall();
+    });
+    async function installIBIME() {
+      if (!deferredInstallPrompt) return;
+      deferredInstallPrompt.prompt();
+      await deferredInstallPrompt.userChoice;
+      deferredInstallPrompt = null;
+      ['installApp','installLogin'].forEach(id => { const el = document.getElementById(id); if (el) el.hidden = true; });
+    }
+    document.getElementById('installApp').addEventListener('click', installIBIME);
+    document.getElementById('installLogin').addEventListener('click', installIBIME);
+  </script>
+</body>
+</html>
