@@ -31,15 +31,20 @@ service cloud.firestore {
       return get(/databases/$(db)/documents/docentes/$(em())).data;
     }
 
+    function activeProfile() {
+      return hasProfile()
+        && (!('bloqueado' in profile()) || profile().bloqueado != true);
+    }
+
     function admin() {
       return isAdminEmail()
-        || (hasProfile()
+        || (activeProfile()
           && profile().rol is string
           && profile().rol.lower() == 'admin');
     }
 
     function isDirectivo() {
-      return hasProfile()
+      return activeProfile()
         && profile().rol is string
         && profile().rol.lower() == 'directivo';
     }
@@ -47,7 +52,7 @@ service cloud.firestore {
     // El admin conserva las capacidades completas. Los docentes pueden
     // consultar los datos académicos necesarios para su propio panel y carga.
     function docente() {
-      return hasProfile()
+      return activeProfile()
         && profile().rol is string
         && profile().rol.lower() in ['docente', 'admin'];
     }
@@ -206,6 +211,7 @@ service cloud.firestore {
         || (isDirectivo() && (
           canSeeGeneralData()
           || privilege('asignaciones')
+          && request.resource.data.calif is number
           || privilege('cargas')
         ))
         || (docente() && resource.data.docente == em());
@@ -213,7 +219,6 @@ service cloud.firestore {
       allow create: if admin()
         || (docente()
           && request.resource.data.docente == em()
-          && request.resource.data.calif is number
           && request.resource.data.calif >= 0
           && request.resource.data.calif <= 10);
 
