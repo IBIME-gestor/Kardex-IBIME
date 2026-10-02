@@ -1,73 +1,150 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{db}/documents {
-    function signedIn() { return request.auth != null; }
-    function em() { return signedIn() ? request.auth.token.email.lower() : ''; }
-    function dom() { return signedIn() && em().matches('.*@ibime[.]edu[.]mx'); }
-    function isAdminEmail() { return dom() && em() == 'josue.jain@ibime.edu.mx'; }
-    function isStoredAdmin() {
-      return dom() && exists(/databases/$(db)/documents/docentes/$(em()))
-        && get(/databases/$(db)/documents/docentes/$(em())).data.rol == 'admin';
+    // ─────────────────────────────────────────────────────────────
+    // Identidad / roles
+    // ─────────────────────────────────────────────────────────────
+    function signedIn() {
+      return request.auth != null && request.auth.token.email != null;
     }
-    function admin() { return isAdminEmail() || isStoredAdmin(); }
-    function docente() {
-      return dom() && exists(/databases/$(db)/documents/docentes/$(em()))
-        && get(/databases/$(db)/documents/docentes/$(em())).data.rol in ['docente', 'admin'];
-    }
-    function ownDocente(id) { return dom() && em() == id; }
 
+    // Firebase Auth normaliza el email del token a minúsculas.
+    function em() {
+      return signedIn() ? request.auth.token.email.lower() : '';
+    }
+
+    function dom() {
+      return signedIn()
+        && request.auth.token.email_verified == true
+        && em().matches('.*@ibime[.]edu[.]mx');
+    }
+
+    function isAdminEmail() {
+      return dom() && em() == 'josue.jain@ibime.edu.mx';
+    }
+
+    function hasTeacherProfile() {
+      return dom()
+        && exists(/databases/$(db)/documents/docentes/$(em()));
+    }
+
+    function isStoredAdmin() {
+      return hasTeacherProfile()
+        && get(/databases/$(db)/documents/docentes/$(em())).data.rol.lower() == 'admin';
+    }
+
+    function admin() {
+      return isAdminEmail() || isStoredAdmin();
+    }
+
+    function docente() {
+      return hasTeacherProfile()
+        && get(/databases/$(db)/documents/docentes/$(em())).data.rol.lower() in ['docente', 'admin'];
+    }
+
+    function ownDocente(id) {
+      return dom() && em() == id.lower();
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Perfiles de docentes
+    // ─────────────────────────────────────────────────────────────
     match /docentes/{id} {
+      // El administrador puede administrar todos los perfiles.
       allow read, write: if admin();
+
+      // Cada docente puede consultar su propio perfil.
       allow get: if ownDocente(id);
+
+      // Primer acceso: el docente puede crear únicamente su propio perfil.
       allow create: if ownDocente(id)
-        && request.resource.data.rol == 'docente'
-        && request.resource.data.correo == id;
+        && request.resource.data.correo == em()
+        && request.resource.data.rol.lower() == 'docente';
+
+      // Un docente puede actualizar su perfil, pero no convertirse en admin.
       allow update: if ownDocente(id)
-        && resource.data.rol == 'docente'
-        && request.resource.data.rol == 'docente'
-        && request.resource.data.correo == id;
+        && resource.data.rol.lower() == 'docente'
+        && request.resource.data.rol.lower() == 'docente'
+        && request.resource.data.correo == em();
+
       allow delete: if admin();
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // Catálogos: lectura para docentes, escritura para admin
+    // ─────────────────────────────────────────────────────────────
     match /grupos/{id} {
       allow read: if docente() || admin();
       allow write: if admin();
     }
+
     match /asignaturas/{id} {
       allow read: if docente() || admin();
       allow write: if admin();
     }
+
+    // ─────────────────────────────────────────────────────────────
+    // Alumnos
+    // ─────────────────────────────────────────────────────────────
     match /alumnos/{id} {
       allow read: if docente() || admin();
       allow create, update: if admin() || (
-        docente() && request.resource.data.correo == id
+        docente()
+        && request.resource.data.correo == id
         && request.resource.data.ultimoDocente == em()
       );
       allow delete: if admin();
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // Asignaciones / avance: cada docente ve y modifica solamente lo suyo
+    // ─────────────────────────────────────────────────────────────
     match /asignaciones/{id} {
       allow read: if admin() || (docente() && resource.data.docente == em());
       allow create: if admin() || (docente() && request.resource.data.docente == em());
-      allow update: if admin() || (docente() && resource.data.docente == em() && request.resource.data.docente == em());
+      allow update: if admin()
+        || (docente()
+            && resource.data.docente == em()
+            && request.resource.data.docente == em());
       allow delete: if admin() || (docente() && resource.data.docente == em());
-    }
-
-    match /calificaciones/{id} {
-      allow read: if admin() || (docente() && resource.data.docente == em());
-      allow create, update: if admin() || (
-        docente() && request.resource.data.docente == em()
-        && request.resource.data.calif is number
-        && request.resource.data.calif >= 0
-        && request.resource.data.calif <= 10
-      );
-      allow delete: if admin();
     }
 
     match /avance/{id} {
       allow read: if admin() || (docente() && resource.data.docente == em());
-      allow create, update: if admin() || (docente() && request.resource.data.docente == em());
+      allow create: if admin() || (docente() && request.resource.data.docente == em());
+      allow update: if admin()
+        || (docente()
+            && resource.data.docente == em()
+            && request.resource.data.docente == em());
       allow delete: if admin() || (docente() && resource.data.docente == em());
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Calificaciones
+    // El ID de las nuevas calificaciones incluye al docente para evitar
+    // colisiones entre dos profesores que carguen el mismo grupo/materia.
+    // ─────────────────────────────────────────────────────────────
+    match /calificaciones/{id} {
+      allow read: if admin() || (docente() && resource.data.docente == em());
+
+      allow create: if admin() || (
+        docente()
+        && request.resource.data.docente == em()
+        && request.resource.data.calif is number
+        && request.resource.data.calif >= 0
+        && request.resource.data.calif <= 10
+      );
+
+      allow update: if admin() || (
+        docente()
+        && resource.data.docente == em()
+        && request.resource.data.docente == em()
+        && request.resource.data.calif is number
+        && request.resource.data.calif >= 0
+        && request.resource.data.calif <= 10
+      );
+
+      allow delete: if admin();
     }
   }
 }
