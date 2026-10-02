@@ -1246,3 +1246,15 @@ body:not(:has(#login)) .install-btn:hover{
     )
   }
 }
+
+/* Panel administrativo/directivo */
+.dashboard-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:18px}
+.dashboard-grid section{background:#fff;border-radius:16px;padding:16px;box-shadow:0 8px 25px rgba(7,52,92,.08);min-width:0}
+.avatar-sm{width:42px;height:42px;border-radius:50%;object-fit:cover;display:block;margin:auto;border:2px solid #dce8f2}
+.avatar-placeholder{width:42px;height:42px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:#edf3f8;margin:auto;color:#72869a}
+.role-badge,.status{display:inline-block;padding:4px 9px;border-radius:999px;font-size:11px;font-weight:800;white-space:nowrap}
+.status.ok{background:#dff4e7;color:#176b38}.status.pending{background:#fff1d6;color:#8a5700}
+.priv-grid{display:grid;grid-template-columns:repeat(2,minmax(220px,1fr));gap:10px;margin:10px 0 20px}
+.priv-grid label{padding:10px 12px;background:#f4f7fa;border-radius:10px}
+.muted{color:#64748b;font-size:13px}
+@media(max-width:850px){.dashboard-grid{grid-template-columns:1fr}.priv-grid{grid-template-columns:1fr}}
