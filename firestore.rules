@@ -1,99 +1,230 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{db}/documents {
+    // ================================================================
+    // IDENTIDAD Y ROLES
+    // ================================================================
     function signedIn() {
       return request.auth != null && request.auth.token.email != null;
     }
+
     function em() {
       return signedIn() ? request.auth.token.email.lower() : '';
     }
+
     function dom() {
       return signedIn()
         && request.auth.token.email_verified == true
         && em().matches('.*@ibime[.]edu[.]mx');
     }
+
     function isAdminEmail() {
       return dom() && em() == 'josue.jain@ibime.edu.mx';
     }
+
     function hasProfile() {
-      return dom() && exists(/databases/$(db)/documents/docentes/$(em()));
+      return dom()
+        && exists(/databases/$(db)/documents/docentes/$(em()));
     }
+
     function profile() {
       return get(/databases/$(db)/documents/docentes/$(em())).data;
     }
+
     function admin() {
-      return isAdminEmail() || (hasProfile() && profile().rol.lower() == 'admin');
+      return isAdminEmail()
+        || (hasProfile()
+          && profile().rol is string
+          && profile().rol.lower() == 'admin');
     }
+
     function isDirectivo() {
-      return hasProfile() && profile().rol.lower() == 'directivo';
+      return hasProfile()
+        && profile().rol is string
+        && profile().rol.lower() == 'directivo';
     }
+
+    // El admin conserva las capacidades completas. Los docentes pueden
+    // consultar los datos académicos necesarios para su propio panel y carga.
     function docente() {
-      return hasProfile() && profile().rol.lower() in ['docente', 'admin'];
+      return hasProfile()
+        && profile().rol is string
+        && profile().rol.lower() in ['docente', 'admin'];
     }
+
+    // Soporta tanto "permisos" (actual) como "privilegios" (compatibilidad
+    // con perfiles anteriores). Un directivo nunca obtiene escritura por
+    // tener un privilegio: los privilegios son exclusivamente de lectura.
     function privilege(p) {
-      return admin() || (isDirectivo() && profile().permisos is list && p in profile().permisos);
+      return admin()
+        || (isDirectivo()
+          && (
+            (profile().permisos is list && p in profile().permisos)
+            || (profile().privilegios is list && p in profile().privilegios)
+          ));
     }
+
     function ownDocente(id) {
       return dom() && em() == id.lower();
     }
 
+    function canSeeGeneralData() {
+      return privilege('dashboardGeneral')
+        || privilege('docentes')
+        || privilege('cargas')
+        || privilege('avance');
+    }
+
+    // ================================================================
+    // DOCENTES
+    // ================================================================
     match /docentes/{id} {
-      allow read: if admin() || (isDirectivo() && (privilege('docentes') || privilege('dashboardGeneral') || privilege('avance'))) || ownDocente(id);
-      allow create: if admin() || (ownDocente(id)
-        && request.resource.data.correo == em()
-        && request.resource.data.rol.lower() == 'docente');
-      allow update: if admin() || (ownDocente(id)
-        && resource.data.rol.lower() == 'docente'
-        && request.resource.data.rol.lower() == 'docente'
-        && request.resource.data.correo == em());
+      allow read: if admin()
+        || (isDirectivo() && canSeeGeneralData())
+        || ownDocente(id);
+
+      // Permite que un docente cree su propio perfil al iniciar sesión por
+      // primera vez. El administrador puede crear/editar cualquier perfil.
+      allow create: if admin()
+        || (ownDocente(id)
+          && request.resource.data.correo == em()
+          && request.resource.data.rol is string
+          && request.resource.data.rol.lower() == 'docente');
+
+      // Un docente solo puede actualizar su propio perfil sin cambiar su rol
+      // ni su correo. Los cambios de directivo/admin quedan para el admin.
+      allow update: if admin()
+        || (ownDocente(id)
+          && resource.data.rol is string
+          && request.resource.data.rol is string
+          && resource.data.rol.lower() == 'docente'
+          && request.resource.data.rol.lower() == 'docente'
+          && request.resource.data.correo == em());
+
       allow delete: if admin();
     }
 
+    // ================================================================
+    // GRUPOS
+    // ================================================================
     match /grupos/{id} {
-      allow read: if docente() || privilege('dashboardGeneral') || privilege('docentes') || privilege('grupos') || privilege('avance');
+      allow read: if docente()
+        || (isDirectivo() && (
+          canSeeGeneralData() || privilege('grupos')
+        ));
+
+      // Alta, edición y borrado de grupos solamente desde Admin.
       allow write: if admin();
     }
+
+    // ================================================================
+    // ASIGNATURAS
+    // ================================================================
     match /asignaturas/{id} {
-      allow read: if docente() || privilege('dashboardGeneral') || privilege('docentes') || privilege('asignaturas');
+      allow read: if docente()
+        || (isDirectivo() && (
+          canSeeGeneralData() || privilege('asignaturas')
+        ));
+
       allow write: if admin();
     }
+
+    // ================================================================
+    // ALUMNOS
+    // ================================================================
     match /alumnos/{id} {
-      allow read: if docente() || privilege('dashboardGeneral') || privilege('docentes') || privilege('alumnos') || privilege('cargas') || privilege('avance');
-      allow create, update: if admin() || (
-        docente()
-        && request.resource.data.correo == id
-      );
+      allow read: if docente()
+        || (isDirectivo() && (
+          canSeeGeneralData()
+          || privilege('alumnos')
+          || privilege('cargas')
+        ));
+
+      // El alumno se identifica por el campo correo, que coincide con el id
+      // del documento. No se exige ultimoDocente para permitir que un mismo
+      // alumno pueda ser actualizado por distintos docentes.
+      allow create, update: if admin()
+        || (docente()
+          && request.resource.data.correo == id);
+
       allow delete: if admin();
     }
+
+    // ================================================================
+    // ASIGNACIONES
+    // ================================================================
     match /asignaciones/{id} {
-      allow read: if admin() || privilege('dashboardGeneral') || privilege('docentes') || privilege('asignaciones') || privilege('cargas') || privilege('avance') || (docente() && resource.data.docente == em());
-      allow create: if admin() || (docente() && request.resource.data.docente == em());
-      allow update: if admin() || (docente() && resource.data.docente == em() && request.resource.data.docente == em());
-      allow delete: if admin() || (docente() && resource.data.docente == em());
+      allow read: if admin()
+        || (isDirectivo() && (
+          canSeeGeneralData()
+          || privilege('asignaciones')
+          || privilege('cargas')
+        ))
+        || (docente() && resource.data.docente == em());
+
+      allow create: if admin()
+        || (docente() && request.resource.data.docente == em());
+
+      allow update: if admin()
+        || (docente()
+          && resource.data.docente == em()
+          && request.resource.data.docente == em());
+
+      allow delete: if admin()
+        || (docente() && resource.data.docente == em());
     }
+
+    // ================================================================
+    // AVANCE
+    // ================================================================
     match /avance/{id} {
-      allow read: if admin() || privilege('dashboardGeneral') || privilege('docentes') || privilege('avance') || privilege('cargas') || privilege('asignaciones') || (docente() && resource.data.docente == em());
-      allow create: if admin() || (docente() && request.resource.data.docente == em());
-      allow update: if admin() || (docente() && resource.data.docente == em() && request.resource.data.docente == em());
-      allow delete: if admin() || (docente() && resource.data.docente == em());
+      allow read: if admin()
+        || (isDirectivo() && (
+          canSeeGeneralData()
+          || privilege('asignaciones')
+          || privilege('cargas')
+        ))
+        || (docente() && resource.data.docente == em());
+
+      allow create: if admin()
+        || (docente() && request.resource.data.docente == em());
+
+      allow update: if admin()
+        || (docente()
+          && resource.data.docente == em()
+          && request.resource.data.docente == em());
+
+      allow delete: if admin()
+        || (docente() && resource.data.docente == em());
     }
+
+    // ================================================================
+    // CALIFICACIONES
+    // ================================================================
     match /calificaciones/{id} {
-      allow read: if admin() || privilege('dashboardGeneral') || privilege('docentes') || privilege('avance') || privilege('cargas') || privilege('asignaciones') || (docente() && resource.data.docente == em());
-      allow create: if admin() || (
-        docente()
-        && request.resource.data.docente == em()
-        && request.resource.data.calif is number
-        && request.resource.data.calif >= 0
-        && request.resource.data.calif <= 10
-      );
-      allow update: if admin() || (
-        docente()
-        && resource.data.docente == em()
-        && request.resource.data.docente == em()
-        && request.resource.data.calif is number
-        && request.resource.data.calif >= 0
-        && request.resource.data.calif <= 10
-      );
+      allow read: if admin()
+        || (isDirectivo() && (
+          canSeeGeneralData()
+          || privilege('asignaciones')
+          || privilege('cargas')
+        ))
+        || (docente() && resource.data.docente == em());
+
+      allow create: if admin()
+        || (docente()
+          && request.resource.data.docente == em()
+          && request.resource.data.calif is number
+          && request.resource.data.calif >= 0
+          && request.resource.data.calif <= 10);
+
+      allow update: if admin()
+        || (docente()
+          && resource.data.docente == em()
+          && request.resource.data.docente == em()
+          && request.resource.data.calif is number
+          && request.resource.data.calif >= 0
+          && request.resource.data.calif <= 10);
+
       allow delete: if admin();
     }
   }
