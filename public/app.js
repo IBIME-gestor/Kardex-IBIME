@@ -8,6 +8,10 @@ const $ = id => document.getElementById(id), main = $('main');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const hash = s => { let a = 0xdeadbeef, b = 0x41c6ce57; for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); a = Math.imul(a ^ c, 2654435761); b = Math.imul(b ^ c, 1597334677); } a = Math.imul(a ^ a >>> 16, 2246822507) ^ Math.imul(b ^ b >>> 13, 3266489909); b = Math.imul(b ^ b >>> 16, 2246822507) ^ Math.imul(a ^ a >>> 13, 3266489909); return (4294967296 * (2097151 & b) + (a >>> 0)).toString(36); };
 const normEmail = v => String(v || '').trim().toLowerCase();
+const sortText = (a,b) => String(a ?? '').localeCompare(String(b ?? ''), 'es', {numeric:true, sensitivity:'base'});
+const docenteNombre = (docentes, email) => docentes.find(x => normEmail(x.correo) === normEmail(email))?.nombre || email || 'Sin docente';
+const cargaKey = (docente, grupo, materia) => `${normEmail(docente)}|${normalizarCatalogo('grupos', grupo)}|${normalizarCatalogo('grupos', materia)}`;
+const grupoKey = (grupo, tipo='') => `${normalizarCatalogo('grupos', grupo)}|${String(tipo||'').toUpperCase()}`;
 let me = null;
 
 const PRIVILEGES = {
@@ -25,6 +29,7 @@ const allPrivs = () => Object.keys(PRIVILEGES);
 const hasPriv = p => me?.rol === 'admin' || (me?.rol === 'directivo' && Array.isArray(me?.permisos) && me.permisos.includes(p));
 const canOpen = k => me?.rol === 'admin' || ({
   dashboard: hasPriv('dashboardGeneral'),
+  cargasPanel: hasPriv('cargas'),
   docentes: hasPriv('docentes'),
   gruposES: hasPriv('grupos'),
   gruposEN: hasPriv('grupos'),
@@ -92,6 +97,9 @@ onAuthStateChanged(auth, async u => {
       }
 
       const data = d.data() || {};
+      if (data.bloqueado === true) {
+        return bloqueo('Tu acceso al portal está bloqueado. Contacta al administrador.');
+      }
       const rol = String(data.rol || '').trim().toLowerCase();
       if (!['docente', 'directivo', 'admin'].includes(rol)) {
         return bloqueo('Tu cuenta no tiene un rol de docente válido. Contacta al administrador.');
@@ -282,33 +290,52 @@ async function vistaDashboard() {
     const d = await obtenerDatosGenerales();
     const cargas = d.cargas;
     const gruposCargados = d.grupos.filter(g => cargas.some(c => cargaTieneGrupo(c, g)));
-    const pendientes = d.grupos.filter(g => !cargas.some(c => cargaTieneGrupo(c, g)));
     const registros = cargas.reduce((s,c)=>s+(Number(c.filas)||0),0);
     const alumnosDetectados = new Set();
     d.califs.forEach(c => { const e=normEmail(c.correo||''); if(e) alumnosDetectados.add(e); });
     d.alumnos.forEach(a => { const e=normEmail(a.correo||''); if(e) alumnosDetectados.add(e); });
 
-    const estadoGrupos = d.grupos.map(g => {
+    const cards = [
+      ['docentes','Docentes',d.docentes.length,'Personas con perfil académico'],
+      ['gruposES','Grupos',d.grupos.length,'Grupos registrados'],
+      ['avance','Grupos con carga',gruposCargados.length,'Consulta el avance general'],
+      ['cargasPanel','Cargas',cargas.length,'Consulta y limpia cargas'],
+      ['cargasPanel','Registros importados',registros,'Detalle de registros'],
+      ['alumnos','Alumnos detectados',alumnosDetectados.size,'Catálogo de alumnos'],
+      ['avance','Calificaciones',d.califs.length,'Avance y resultados'],
+      ['asignaturas','Asignaturas',d.mats.length,'Catálogo de materias']
+    ];
+    const cardHtml=cards.filter(([go])=>canOpen(go)).map(([go,label,value,sub])=>
+      `<button class="dash-card" data-go="${go}" type="button"><b>${value}</b><span>${esc(label)}</span><small>${esc(sub)}</small><i>›</i></button>`).join('');
+
+    const estadoGrupos = [...d.grupos].sort((a,b)=>sortText(a.nombre,b.nombre)).map(g => {
       const rows=cargas.filter(c=>cargaTieneGrupo(c,g));
       const docentes=[...new Set(rows.map(c=>c.docente).filter(Boolean))];
-      const materias=[...new Set(rows.map(c=>c.materia).filter(Boolean))];
+      const materias=[...new Set(rows.map(c=>c.materia).filter(Boolean))].sort(sortText);
       const regs=rows.reduce((s,c)=>s+(Number(c.filas)||0),0);
-      return `<tr><td><strong>${esc(g.nombre||'')}</strong></td><td>${esc(g.tipo||'')}</td><td><span class="status ${rows.length?'ok':'pending'}">${rows.length?'CARGADO':'PENDIENTE'}</span></td><td>${rows.length}</td><td>${esc(docentes.map(e=>d.docentes.find(x=>normEmail(x.correo)===normEmail(e))?.nombre||e).join(', ')||'—')}</td><td>${esc(materias.join(', ')||'—')}</td><td>${regs}</td></tr>`;
+      const details=rows.sort((a,b)=>sortText(a.materia,b.materia)).map(c=>
+        `<div class="cascade-row"><strong>${esc(docenteNombre(d.docentes,c.docente))}</strong><span>${esc(c.materia)}</span><span>${Number(c.filas)||0} registros</span><span>${Number(c.alumnos)||0} alumnos</span></div>`).join('');
+      return `<tr class="clickable-row" data-group="${esc(grupoKey(g.nombre,g.tipo))}">
+        <td><strong>${esc(g.nombre||'')}</strong></td><td>${esc(g.tipo||'')}</td>
+        <td><span class="status ${rows.length?'ok':'pending'}">${rows.length?'CARGADO':'PENDIENTE'}</span></td>
+        <td>${rows.length}</td><td>${esc(docentes.map(e=>docenteNombre(d.docentes,e)).join(', ')||'—')}</td>
+        <td>${esc(materias.join(', ')||'—')}</td><td>${regs}</td>
+      </tr>
+      <tr class="cascade-detail" data-detail="${esc(grupoKey(g.nombre,g.tipo))}" hidden>
+        <td colspan="7"><div class="cascade-box">${details||'<span class="muted">Este grupo todavía no tiene cargas.</span>'}</div></td>
+      </tr>`;
     }).join('');
 
-    const docenteRows=d.docentes.map(t=>{
-      const mine=cargas.filter(c=>normEmail(c.docente)===normEmail(t.correo));
-      const detalle=mine.map(c=>`${c.grupo} · ${c.materia} (${Number(c.filas)||0})`).join(' | ');
-      return `<tr><td>${t.foto?`<img class="avatar-sm" src="${esc(t.foto)}" alt="Foto">`:'<div class="avatar-placeholder">—</div>'}</td><td><strong>${esc(t.nombre||t.correo)}</strong><small class="cell-sub">${esc(t.correo||'')}</small></td><td>${mine.length}</td><td>${mine.reduce((s,c)=>s+(Number(c.filas)||0),0)}</td><td>${esc(detalle||'Sin cargas registradas')}</td></tr>`;
-    }).join('');
-
-    const cargaRows=cargas.map(c=>`<tr><td>${esc(d.docentes.find(x=>normEmail(x.correo)===normEmail(c.docente))?.nombre||c.docente)}</td><td>${esc(c.grupo)}</td><td>${esc(c.tipo||'')}</td><td>${esc(c.materia)}</td><td>${Number(c.alumnos)||0}</td><td><strong>${Number(c.filas)||0}</strong></td><td><span class="status ${String(c.estado||'CARGADO').toUpperCase()==='CARGADO'?'ok':'pending'}">${esc(c.estado||'CARGADO')}</span></td><td>${esc([...c.sources].join(', '))}</td></tr>`).join('');
-
-    main.innerHTML=`<div class="section-head"><div><h2>${me.rol === 'admin' ? 'Dashboard del administrador' : 'Dashboard general'}</h2><p>Resumen real de grupos, docentes, cargas y registros encontrados en Firebase.</p></div></div>
-      <div class="cards dashboard-cards"><div><b>${d.docentes.length}</b><span>Docentes</span></div><div><b>${d.grupos.length}</b><span>Grupos</span></div><div><b>${gruposCargados.length}</b><span>Grupos con carga</span></div><div><b>${cargas.length}</b><span>Cargas docente · grupo · materia</span></div><div><b>${registros}</b><span>Registros importados</span></div><div><b>${alumnosDetectados.size}</b><span>Alumnos detectados</span></div><div><b>${d.califs.length}</b><span>Calificaciones</span></div><div><b>${d.mats.length}</b><span>Asignaturas</span></div></div>
-      <section class="dashboard-section"><div class="section-title"><div><h3>Estado de grupos</h3><p>Cada grupo se marca como cargado solo cuando existe una carga del mismo grupo y tipo.</p></div><span class="section-count">${gruposCargados.length} / ${d.grupos.length}</span></div><div class="table-wrap"><table><thead><tr><th>Grupo</th><th>Tipo</th><th>Estado</th><th>Cargas</th><th>Docente(s)</th><th>Materia(s)</th><th>Registros</th></tr></thead><tbody>${estadoGrupos||'<tr><td colspan="7" class="empty">No hay grupos registrados.</td></tr>'}</tbody></table></div>${pendientes.length?`<p class="muted"><strong>Pendientes:</strong> ${esc(pendientes.map(g=>`${g.nombre} (${g.tipo||'sin tipo'})`).join(', '))}</p>`:''}</section>
-      <section class="dashboard-section"><div class="section-title"><div><h3>Docentes y sus cargas</h3><p>Se muestra qué grupo y materia cargó cada docente y cuántos registros produjo.</p></div></div><div class="table-wrap"><table><thead><tr><th>Foto</th><th>Docente</th><th>Cargas</th><th>Registros</th><th>Detalle de cargas</th></tr></thead><tbody>${docenteRows||'<tr><td colspan="5" class="empty">No hay docentes.</td></tr>'}</tbody></table></div></section>
-      <section class="dashboard-section"><div class="section-title"><div><h3>Detalle de cargas detectadas</h3><p>Esta es la fuente que alimenta los números del dashboard. No se cuentan grupos duplicados como cargas independientes.</p></div><span class="section-count">${cargas.length}</span></div><div class="table-wrap"><table><thead><tr><th>Docente</th><th>Grupo</th><th>Tipo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Origen</th></tr></thead><tbody>${cargaRows||'<tr><td colspan="8" class="empty">No hay cargas registradas.</td></tr>'}</tbody></table></div></section>`;
+    main.innerHTML=`<div class="section-head"><div><h2>${me.rol === 'admin' ? 'Dashboard del administrador' : 'Dashboard general'}</h2><p>Resumen ejecutivo. Los detalles se despliegan solo cuando los necesitas.</p></div></div>
+      <div class="cards dashboard-cards">${cardHtml}</div>
+      <section class="dashboard-section"><div class="section-title"><div><h3>Estado de grupos</h3><p>Haz clic en un grupo para ver docentes y materias.</p></div><span class="section-count">${gruposCargados.length} / ${d.grupos.length}</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Grupo</th><th>Tipo</th><th>Estado</th><th>Cargas</th><th>Docente(s)</th><th>Materia(s)</th><th>Registros</th></tr></thead><tbody>${estadoGrupos||'<tr><td colspan="7" class="empty">No hay grupos registrados.</td></tr>'}</tbody></table></div></section>`;
+    main.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>ir(b.dataset.go));
+    main.querySelectorAll('[data-group]').forEach(row=>row.onclick=()=>{
+      const key=row.dataset.group, detail=main.querySelector(`[data-detail="${CSS.escape(key)}"]`);
+      if(detail) detail.hidden=!detail.hidden;
+      row.classList.toggle('expanded', detail ? !detail.hidden : false);
+    });
     return;
   }
 
@@ -319,23 +346,20 @@ async function vistaDashboard() {
   const map=new Map();
   const add=(a)=>{const grupo=recordGrupo(a), materia=recordMateria(a);if(!grupo||!materia)return;const key=`${normalizarCatalogo('grupos',grupo)}|${normalizarCatalogo('grupos',materia)}`;map.set(key,{...map.get(key),...a,grupo,materia,tipo:recordTipo(a)||inferTipo(grupo,grupos)});};
   [...av,...asig].forEach(add);
-  const counts=new Map(); const alumnosMap=new Map();
+  const counts=new Map(), alumnosMap=new Map();
   cal.forEach(c=>{const grupo=recordGrupo(c),materia=recordMateria(c);if(!grupo||!materia)return;const key=`${normalizarCatalogo('grupos',grupo)}|${normalizarCatalogo('grupos',materia)}`;counts.set(key,(counts.get(key)||0)+1);if(c.correo){if(!alumnosMap.has(key))alumnosMap.set(key,new Set());alumnosMap.get(key).add(normEmail(c.correo));}add(c);});
   for(const [key,n] of counts){const x=map.get(key);if(x)x.filas=Math.max(Number(x.filas)||0,n);}
   for(const [key,set] of alumnosMap){const x=map.get(key);if(x)x.alumnos=Math.max(Number(x.alumnos)||0,set.size);}
-  const ds=[...map.values()];
+  const ds=[...map.values()].sort((a,b)=>sortText(a.grupo,b.grupo)||sortText(a.materia,b.materia));
   const total=ds.reduce((s,a)=>s+(Number(a.filas)||0),0);
-  const alumnos=new Set();
-  ds.forEach(a=>{
-    const key=`${normalizarCatalogo('grupos',a.grupo)}|${normalizarCatalogo('grupos',a.materia)}`;
-    const set=alumnosMap.get(key);
-    if(set) set.forEach(x=>alumnos.add(x));
-  });
-  const alumnosTotal=alumnos.size;
-  main.innerHTML=`<div class="perfil">${me.foto?`<img src="${esc(me.foto)}" alt="Foto">`:''}<div><h2>Hola, ${esc(me.nombre)}</h2><p>${esc(me.email)} · ${esc(me.rol)}</p></div></div><div class="cards"><div><b>${ds.length}</b><span>Cargas realizadas</span></div><div><b>${alumnosTotal}</b><span>Alumnos detectados</span></div><div><b>${total}</b><span>Registros importados</span></div><div><b>${cal.length}</b><span>Calificaciones</span></div></div><div class="acciones"><button class="p" id="nueva">+ Cargar nuevo reporte</button></div><section class="dashboard-section"><div class="section-title"><div><h3>Mis grupos cargados</h3><p>Aquí ves exactamente qué grupo cargaste, de qué tipo es, la materia y cuántos registros produjo.</p></div></div>${ds.length?`<div class="table-wrap"><table><thead><tr><th>Grupo</th><th>Tipo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Fecha</th></tr></thead><tbody>${ds.map(a=>`<tr><td><strong>${esc(a.grupo)}</strong></td><td>${esc(a.tipo||'')}</td><td>${esc(a.materia)}</td><td>${Number(a.alumnos)||0}</td><td><strong>${Number(a.filas)||0}</strong></td><td><span class="status ${String(a.estado||'CARGADO').toUpperCase()==='CARGADO'?'ok':'pending'}">${esc(a.estado||'CARGADO')}</span></td><td>${fecha(a.fecha||a.actualizado)}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">Todavía no hay cargas asociadas a tu cuenta.</div>'}</section>`;
+  const alumnos=new Set(); ds.forEach(a=>alumnosMap.get(`${normalizarCatalogo('grupos',a.grupo)}|${normalizarCatalogo('grupos',a.materia)}`)?.forEach(x=>alumnos.add(x)));
+  main.innerHTML=`<div class="perfil">${me.foto?`<img src="${esc(me.foto)}" alt="Foto">`:''}<div><h2>Hola, ${esc(me.nombre)}</h2><p>${esc(me.email)} · ${esc(me.rol)}</p></div></div>
+    <div class="cards"><div><b>${ds.length}</b><span>Cargas realizadas</span></div><div><b>${alumnos.size}</b><span>Alumnos detectados</span></div><div><b>${total}</b><span>Registros importados</span></div><div><b>${cal.length}</b><span>Calificaciones</span></div></div>
+    <div class="acciones"><button class="p" id="nueva">+ Cargar nuevo reporte</button></div>
+    <section class="dashboard-section"><div class="section-title"><div><h3>Mis grupos cargados</h3><p>Consulta tu información y avance por grupo.</p></div></div>
+    ${ds.length?`<div class="table-wrap"><table><thead><tr><th>Grupo</th><th>Tipo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Fecha</th></tr></thead><tbody>${ds.map(a=>`<tr><td><strong>${esc(a.grupo)}</strong></td><td>${esc(a.tipo||'')}</td><td>${esc(a.materia)}</td><td>${Number(a.alumnos)||0}</td><td><strong>${Number(a.filas)||0}</strong></td><td><span class="status ${String(a.estado||'CARGADO').toUpperCase()==='CARGADO'?'ok':'pending'}">${esc(a.estado||'CARGADO')}</span></td><td>${fecha(a.fecha||a.actualizado)}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">Todavía no hay cargas asociadas a tu cuenta.</div>'}</section>`;
   $('nueva').onclick=()=>ir('importar');
 }
-
 async function vistaImportar() {
   await auth.currentUser?.getIdToken(true);
   const [rows, gruposES, gruposEN, mats] = await Promise.all([
@@ -414,7 +438,9 @@ async function importar(){
     await auth.currentUser?.getIdToken(true);
     const perfilRef = doc(db, 'docentes', me.email);
     const perfilSnap = await getDoc(perfilRef);
-    const rol = String(perfilSnap.data()?.rol || '').trim().toLowerCase();
+    const perfilData = perfilSnap.data() || {};
+    const rol = String(perfilData.rol || '').trim().toLowerCase();
+    if (perfilData.bloqueado === true) { log('❌ Tu acceso está bloqueado por el administrador.'); $('go').disabled=false; return; }
     if (!perfilSnap.exists() || !['docente','admin'].includes(rol)) {
       log('❌ Tu cuenta no tiene un perfil docente válido en Firestore.');
       log(`Correo: ${me.email}`);
@@ -683,11 +709,13 @@ async function vistaTab(k) {
   let rows=ds.map(d=>({id:d.id,...d.data()}));
   if(k==='gruposES') rows=rows.filter(r=>String(r.tipo||'').toUpperCase()==='ESPAÑOL');
   if(k==='gruposEN') rows=rows.filter(r=>String(r.tipo||'').toUpperCase()==='INGLES');
+  const sortField = k==='alumnos' ? 'nombre' : (k==='docentes' ? 'nombre' : 'nombre');
+  rows.sort((a,b)=>sortText(a[sortField],b[sortField]));
   const bulk=esCargaMasiva(k), alumnoBulk=k==='alumnos', docenteBulk=k==='docentes';
   main.innerHTML=`<div class="section-head"><div><h2>${t.n}</h2><p>${bulk ? (alumnoBulk ? 'Carga tu Excel o descarga la plantilla oficial. Revisa todos los alumnos antes de guardarlos.' : 'Agrega una por una o pega directamente varias filas copiadas de Google Sheets. Revisa todo antes de guardar.') : 'Agrega, edita y completa la información. Los cambios se guardan en Firestore.'}</p></div><div class="actions"><button class="p" id="nuevo">+ Nuevo</button>${alumnoBulk ? '<button id="plantillaAlumnos">DESCARGAR PLANTILLA EXCEL</button><label class="button-file" for="excelAlumnos">SUBIR EXCEL</label><input id="excelAlumnos" type="file" accept=".xlsx,.xls" hidden>' : bulk ? '<button id="pegarMasivo">Pegar desde Sheets</button>' : ''}</div></div>
     ${bulk ? `<div id="bulkPaste" class="bulk-paste" hidden><label>${alumnoBulk ? 'También puedes pegar las 6 columnas desde Excel/Sheets' : docenteBulk ? 'Pega hasta 50 docentes desde Google Sheets' : 'Pega aquí las filas copiadas de Google Sheets'}<textarea id="pasteArea" rows="7" placeholder="${alumnoBulk ? 'MATRICULA<TAB>NOMBRE<TAB>CORREO<TAB>GRUPO ESPAÑOL<TAB>GRUPO INGLES<TAB>TUTOR' : docenteBulk ? 'CORREO<TAB>NOMBRE<TAB>ROL<TAB>FOTO URL\nprofesor@ibime.edu.mx<TAB>Nombre<TAB>docente' : k === 'asignaturas' ? 'Materia<TAB>Tipo\nMATEMÁTICAS<TAB>ESPAÑOL\nENGLISH<TAB>INGLES' : 'Grupo\n1A\n1B\n2A'}"></textarea></label><div class="actions"><button id="procesarPegado" class="p">PREVISUALIZAR FILAS</button><button id="cancelarPegado">Cancelar</button></div></div><div id="bulkEditor" class="editor" hidden></div>` : '<div id="editor" class="editor" hidden></div>'}
     <div class="tools"><input id="buscar" placeholder="Buscar..."><button id="recargar">Actualizar</button></div>
-    <div class="table-wrap"><table><thead><tr>${t.f.map(f=>`<th>${f}</th>`).join('')}<th>Acciones</th></tr></thead><tbody>${rows.map(r=>`<tr>${t.f.map(f=>`<td>${esc(Array.isArray(r[f])?r[f].join(', '):r[f])}</td>`).join('')}<td class="actions"><button data-edit="${esc(r.id)}">Editar</button><button class="danger" data-del="${esc(r.id)}">Borrar</button></td></tr>`).join('')||'<tr><td colspan="20" class="empty">No hay registros.</td></tr>'}</tbody></table></div>`;
+    <div class="table-wrap catalog-table"><table><thead><tr>${t.f.map(f=>`<th>${f}</th>`).join('')}<th>Acciones</th></tr></thead><tbody>${rows.map(r=>`<tr>${t.f.map(f=>`<td>${esc(Array.isArray(r[f])?r[f].join(', '):r[f])}</td>`).join('')}<td class="actions"><button data-edit="${esc(r.id)}">Editar</button><button class="danger" data-del="${esc(r.id)}">Borrar</button></td></tr>`).join('')||'<tr><td colspan="20" class="empty">No hay registros.</td></tr>'}</tbody></table></div>`;
 
   const editor=$('editor');
   const openEditor=(data={})=>{
@@ -725,16 +753,56 @@ async function vistaTab(k) {
 }
 
 async function vistaDocentesPanel(){
-  const ds=(await getDocs(collection(db,'docentes'))).docs.map(d=>({id:d.id,...d.data()})).filter(d=>['docente','directivo'].includes(String(d.rol||'').toLowerCase()));
-  let cargas=[]; try { const d=await obtenerDatosGenerales(); cargas=d.cargas; } catch(_) {}
-  main.innerHTML=`<div class="section-head"><div><h2>Panel de docentes</h2><p>Consulta su foto, rol, privilegios, cargas y registros. Puedes agregar uno por uno o pegar hasta 50 docentes.</p></div><div class="actions"><button class="p" id="nuevoDoc">+ Nuevo perfil</button><button id="masivoDoc">Agregar hasta 50</button><button id="actualizarDocs">Actualizar</button></div></div><div id="docBulkPaste" class="bulk-paste" hidden><label>Pega hasta 50 docentes desde Google Sheets (Correo, Nombre, Rol, Foto URL)<textarea id="docPasteArea" rows="7" placeholder="CORREO<TAB>NOMBRE<TAB>ROL<TAB>FOTO URL\nprofesor@ibime.edu.mx<TAB>Nombre<TAB>docente"></textarea></label><div class="actions"><button id="procesarDocPaste" class="p">PREVISUALIZAR</button><button id="cancelarDocPaste">Cancelar</button></div></div><div id="bulkEditor" class="editor" hidden></div><div class="table-wrap"><table><tr><th>Foto</th><th>Docente</th><th>Correo</th><th>Rol</th><th>Privilegios</th><th>Cargas</th><th>Registros</th><th>Acciones</th></tr>${ds.map(d=>{const mine=cargas.filter(c=>normEmail(c.docente)===normEmail(d.correo));return `<tr><td>${d.foto?`<img class="avatar-sm" src="${esc(d.foto)}" alt="Foto de ${esc(d.nombre||'docente')}">`:'<div class="avatar-placeholder">—</div>'}</td><td>${esc(d.nombre||'')}</td><td>${esc(d.correo||d.id)}</td><td><span class="role-badge">${esc(String(d.rol||'docente').toUpperCase())}</span></td><td>${esc((Array.isArray(d.permisos)?d.permisos:[]).map(p=>PRIVILEGES[p]||p).join(', ')||'—')}</td><td>${mine.length}</td><td>${mine.reduce((s,c)=>s+(Number(c.filas)||0),0)}</td><td class="actions"><button data-edit-doc2="${esc(d.id)}">Editar</button><button data-view-doc="${esc(d.correo)}">Ver cargas</button></td></tr>`}).join('')}</table></div>`;
+  const ds=(await getDocs(collection(db,'docentes'))).docs.map(d=>({id:d.id,...d.data()}))
+    .filter(d=>['docente','directivo'].includes(String(d.rol||'').toLowerCase()))
+    .sort((a,b)=>sortText(a.nombre||a.correo,b.nombre||b.correo));
+  let cargas=[]; try { cargas=(await obtenerDatosGenerales()).cargas; } catch(_) {}
+
+  const rows=ds.map(d=>{
+    const mine=cargas.filter(c=>normEmail(c.docente)===normEmail(d.correo)).sort((a,b)=>sortText(a.grupo,b.grupo)||sortText(a.materia,b.materia));
+    const detalles=mine.map(c=>`<div class="cascade-row"><strong>${esc(c.grupo)}</strong><span>${esc(c.materia)}</span><span>${Number(c.filas)||0} registros</span><span>${Number(c.alumnos)||0} alumnos</span><span>${esc(c.estado||'CARGADO')}</span></div>`).join('');
+    const estado=d.bloqueado===true?'BLOQUEADO':'ACTIVO';
+    return `<tr class="clickable-row" data-doc-row="${esc(d.id)}">
+      <td>${d.foto?`<img class="avatar-sm" src="${esc(d.foto)}" alt="Foto">`:'<div class="avatar-placeholder">—</div>'}</td>
+      <td><strong>${esc(d.nombre||'')}</strong><small class="cell-sub">${esc(d.correo||d.id)}</small></td>
+      <td><span class="role-badge">${esc(String(d.rol||'docente').toUpperCase())}</span></td>
+      <td><span class="status ${d.bloqueado?'pending':'ok'}">${estado}</span></td>
+      <td>${mine.length}</td><td>${mine.reduce((s,c)=>s+(Number(c.filas)||0),0)}</td>
+      <td class="actions"><button data-edit-doc2="${esc(d.id)}">Editar</button><button data-toggle-block="${esc(d.id)}">${d.bloqueado?'Desbloquear':'Bloquear'}</button><button class="danger" data-delete-doc="${esc(d.id)}">Eliminar</button></td>
+    </tr>
+    <tr class="cascade-detail" data-doc-detail="${esc(d.id)}" hidden><td colspan="7"><div class="cascade-box">
+      <div class="doc-detail-head"><strong>${esc(d.nombre||d.correo)}</strong><span>${esc(d.correo)}</span></div>
+      ${detalles||'<span class="muted">Sin reportes cargados.</span>'}
+    </div></td></tr>`;
+  }).join('');
+
+  main.innerHTML=`<div class="section-head"><div><h2>Panel de docentes</h2><p>Haz clic en cada docente para ver exactamente qué grupos, materias y registros ha cargado.</p></div><div class="actions"><button class="p" id="nuevoDoc">+ Nuevo perfil</button><button id="actualizarDocs">Actualizar</button></div></div>
+  <div class="tools"><input id="buscarDoc" placeholder="Buscar docente o correo..."></div>
+  <div class="table-wrap"><table><thead><tr><th>Foto</th><th>Docente</th><th>Rol</th><th>Acceso</th><th>Cargas</th><th>Registros</th><th>Acciones</th></tr></thead><tbody>${rows||'<tr><td colspan="7" class="empty">No hay docentes.</td></tr>'}</tbody></table></div>`;
   $('nuevoDoc').onclick=()=>editarDocente(null);
-  $('masivoDoc').onclick=()=>{ const box=$('docBulkPaste'); box.hidden=!box.hidden; if(!box.hidden)$('docPasteArea').focus(); };
-  $('cancelarDocPaste').onclick=()=>{ $('docBulkPaste').hidden=true; $('docPasteArea').value=''; };
-  $('procesarDocPaste').onclick=()=>{ const parsed=parsearPegado('docentes',$('docPasteArea').value); if(!parsed.length)return alert('No encontré filas válidas.'); renderBulkEditor('docentes',parsed,ds); };
   $('actualizarDocs').onclick=()=>vistaDocentesPanel();
+  $('buscarDoc').oninput=e=>{const term=e.target.value.toLowerCase();main.querySelectorAll('tbody tr').forEach(tr=>tr.hidden=!tr.textContent.toLowerCase().includes(term));};
+  main.querySelectorAll('[data-doc-row]').forEach(row=>row.onclick=e=>{
+    if(e.target.closest('button')) return;
+    const detail=main.querySelector(`[data-doc-detail="${CSS.escape(row.dataset.docRow)}"]`);
+    if(detail) detail.hidden=!detail.hidden;
+    row.classList.toggle('expanded',detail?!detail.hidden:false);
+  });
   main.querySelectorAll('[data-edit-doc2]').forEach(b=>b.onclick=()=>editarDocente(b.dataset.editDoc2));
-  main.querySelectorAll('[data-view-doc]').forEach(b=>b.onclick=()=>vistaCargasPanel(b.dataset.viewDoc));
+  main.querySelectorAll('[data-toggle-block]').forEach(b=>b.onclick=async()=>{
+    const id=b.dataset.toggleBlock, snap=await getDoc(doc(db,'docentes',id)), data=snap.data()||{};
+    if(id.toLowerCase()===ADMIN_EMAIL.toLowerCase()) return alert('No puedes bloquear al administrador principal.');
+    const bloquear=data.bloqueado!==true;
+    if(!confirm(`¿${bloquear?'Bloquear':'desbloquear'} el acceso de ${data.nombre||id}?`)) return;
+    try{await setDoc(doc(db,'docentes',id),{bloqueado:bloquear,actualizado:serverTimestamp()},{merge:true});vistaDocentesPanel();}catch(e){alert('No se pudo cambiar el acceso: '+e.message);}
+  });
+  main.querySelectorAll('[data-delete-doc]').forEach(b=>b.onclick=async()=>{
+    const id=b.dataset.deleteDoc;
+    if(id.toLowerCase()===ADMIN_EMAIL.toLowerCase()) return alert('No puedes eliminar al administrador principal.');
+    const snap=await getDoc(doc(db,'docentes',id)), data=snap.data()||{};
+    if(!confirm(`¿Eliminar el perfil de ${data.nombre||id}? Esto no elimina sus reportes académicos.`)) return;
+    try{await deleteDoc(doc(db,'docentes',id));vistaDocentesPanel();}catch(e){alert('No se pudo eliminar: '+e.message);}
+  });
 }
 
 async function editarDocente(correo){
@@ -746,33 +814,84 @@ async function editarDocente(correo){
     <label>Nombre<input id="edNombre" value="${esc(data.nombre||'')}"></label>
     <label>Foto URL<input id="edFoto" value="${esc(data.foto||'')}" placeholder="URL de foto de Google"></label>
     <label>Rol<select id="edRol" ${isAdmin?'disabled':''}><option value="docente" ${data.rol==='docente'?'selected':''}>Docente</option><option value="directivo" ${data.rol==='directivo'?'selected':''}>Directivo</option><option value="admin" ${data.rol==='admin'?'selected':''}>Administrador</option></select></label>
-  </div><h3>Privilegios del directivo</h3><div class="priv-grid">${Object.entries(PRIVILEGES).map(([k,n])=>`<label><input type="checkbox" class="priv-check" value="${k}" ${permisos.includes(k)?'checked':''}> ${esc(n)}</label>`).join('')}</div><div class="actions"><button id="cancelEd">Cancelar</button><button class="p" id="saveEd">Guardar privilegios y perfil</button></div></div>`;
+  </div><label class="check-wide"><input id="edBloqueado" type="checkbox" ${data.bloqueado===true?'checked':''} ${isAdmin?'disabled':''}> Bloquear acceso al portal</label>
+  <h3>Privilegios del directivo</h3><div class="priv-grid">${Object.entries(PRIVILEGES).map(([k,n])=>`<label><input type="checkbox" class="priv-check" value="${k}" ${permisos.includes(k)?'checked':''}> ${esc(n)}</label>`).join('')}</div>
+  <div class="actions"><button id="cancelEd">Cancelar</button><button class="p" id="saveEd">Guardar perfil</button></div></div>`;
   $('cancelEd').onclick=()=>vistaDocentesPanel();
   $('saveEd').onclick=async()=>{
     const em=normEmail($('edCorreo').value), rol=isAdmin?'admin':$('edRol').value, priv=[...document.querySelectorAll('.priv-check:checked')].map(x=>x.value);
     if(!em || !em.endsWith('@'+DOMINIO)) return alert('Usa un correo @ibime.edu.mx.');
     if(rol==='directivo' && !priv.length) return alert('Selecciona al menos un privilegio para el directivo.');
-    try{ await setDoc(doc(db,'docentes',em),normalizarGuardado({correo:em,nombre:$('edNombre').value.trim(),foto:$('edFoto').value.trim(),rol,permisos:rol==='admin'?allPrivs():priv,actualizado:serverTimestamp()}),{merge:true}); alert('Perfil actualizado.'); vistaDocentesPanel(); }catch(e){alert('No se pudo guardar: '+e.message);}
+    try{ await setDoc(doc(db,'docentes',em),normalizarGuardado({correo:em,nombre:$('edNombre').value.trim(),foto:$('edFoto').value.trim(),rol,permisos:rol==='admin'?allPrivs():priv,bloqueado:isAdmin?false:$('edBloqueado').checked,actualizado:serverTimestamp()}),{merge:true}); alert('Perfil actualizado.'); vistaDocentesPanel(); }catch(e){alert('No se pudo guardar: '+e.message);}
   };
 }
-
 async function vistaCargasPanel(filtroDocente=''){
   const d=await obtenerDatosGenerales();
-  const rows=filtroDocente?d.cargas.filter(c=>normEmail(c.docente)===normEmail(filtroDocente)):d.cargas;
-  main.innerHTML=`<div class="section-head"><div><h2>Cargas y registros</h2><p>Una fila representa una combinación de docente + grupo + materia. Los registros provienen de avance y, si falta, de las calificaciones existentes.</p></div><button id="backDash">Dashboard</button></div><div class="tools"><input id="buscarCarga" placeholder="Buscar docente, grupo o materia..."><button id="refCargas">Actualizar</button></div><div class="table-wrap"><table><thead><tr><th>Docente</th><th>Grupo</th><th>Tipo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Origen</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(d.docentes.find(x=>normEmail(x.correo)===normEmail(r.docente))?.nombre||r.docente)}</td><td>${esc(r.grupo)}</td><td>${esc(r.tipo||'')}</td><td>${esc(r.materia)}</td><td>${Number(r.alumnos)||0}</td><td><strong>${Number(r.filas)||0}</strong></td><td><span class="status ${String(r.estado||'CARGADO').toUpperCase()==='CARGADO'?'ok':'pending'}">${esc(r.estado||'CARGADO')}</span></td><td>${esc([...r.sources].join(', '))}</td></tr>`).join('')||'<tr><td colspan="8" class="empty">No hay cargas registradas.</td></tr>'}</tbody></table></div>`;
-  $('backDash').onclick=()=>ir('dashboard'); $('refCargas').onclick=()=>vistaCargasPanel(filtroDocente); $('buscarCarga').oninput=e=>{const term=e.target.value.toLowerCase();main.querySelectorAll('tbody tr').forEach(tr=>tr.hidden=!tr.textContent.toLowerCase().includes(term));};
+  const rows=(filtroDocente?d.cargas.filter(c=>normEmail(c.docente)===normEmail(filtroDocente)):d.cargas)
+    .sort((a,b)=>sortText(a.grupo,b.grupo)||sortText(a.docente,b.docente)||sortText(a.materia,b.materia));
+  const grupos=[...new Map(rows.map(r=>[cargaKey(r.docente,r.grupo,r.materia),r])).values()];
+  const grouped=[...new Map(rows.map(r=>[grupoKey(r.grupo,r.tipo),{grupo:r.grupo,tipo:r.tipo,rows:[]}])).values()];
+  rows.forEach(r=>grouped.find(g=>grupoKey(g.grupo,g.tipo)===grupoKey(r.grupo,r.tipo))?.rows.push(r));
+  main.innerHTML=`<div class="section-head"><div><h2>Cargas y registros</h2><p>Información agrupada por grupo. Despliega un grupo para ver docentes y materias.</p></div><div class="actions"><button id="backDash">Dashboard</button><button id="refCargas">Actualizar</button></div></div>
+  <div class="tools"><input id="buscarCarga" placeholder="Buscar docente, grupo o materia..."></div>
+  <div class="cascade-list">${grouped.map(g=>{
+    const key=grupoKey(g.grupo,g.tipo);
+    const inner=g.rows.sort((a,b)=>sortText(a.docente,b.docente)||sortText(a.materia,b.materia)).map(r=>`<div class="cascade-row">
+      <strong>${esc(docenteNombre(d.docentes,r.docente))}</strong><span>${esc(r.materia)}</span><span>${Number(r.alumnos)||0} alumnos</span><span>${Number(r.filas)||0} registros</span><span class="status ${String(r.estado||'CARGADO').toUpperCase()==='CARGADO'?'ok':'pending'}">${esc(r.estado||'CARGADO')}</span>
+    </div>`).join('');
+    return `<div class="cascade-group"><button type="button" class="cascade-toggle" data-cascade="${esc(key)}"><span>${esc(g.grupo)}</span><small>${esc(g.tipo||'')} · ${g.rows.length} cargas</small><b>›</b></button><div class="cascade-content" data-cascade-detail="${esc(key)}" hidden>${inner}</div></div>`;
+  }).join('')||'<div class="empty">No hay cargas registradas.</div>'}</div>`;
+  $('backDash').onclick=()=>ir('dashboard'); $('refCargas').onclick=()=>vistaCargasPanel(filtroDocente);
+  $('buscarCarga').oninput=e=>{const term=e.target.value.toLowerCase();main.querySelectorAll('.cascade-group').forEach(x=>x.hidden=!x.textContent.toLowerCase().includes(term));};
+  main.querySelectorAll('[data-cascade]').forEach(b=>b.onclick=()=>{const d=main.querySelector(`[data-cascade-detail="${CSS.escape(b.dataset.cascade)}"]`);if(d)d.hidden=!d.hidden;b.classList.toggle('expanded',d?!d.hidden:false);});
+}
+
+async function borrarCargaCompleta(c){
+  const keyDoc=normEmail(c.docente), keyGrupo=normalizarCatalogo('grupos',c.grupo), keyMateria=normalizarCatalogo('grupos',c.materia);
+  const [calSnap,asigSnap,avSnap]=await Promise.all([
+    getDocs(collection(db,'calificaciones')),getDocs(collection(db,'asignaciones')),getDocs(collection(db,'avance'))
+  ]);
+  const targets=[];
+  calSnap.docs.forEach(x=>{const r=x.data();if(normEmail(r.docente)===keyDoc&&normalizarCatalogo('grupos',recordGrupo(r))===keyGrupo&&normalizarCatalogo('grupos',recordMateria(r))===keyMateria)targets.push(['calificaciones',x.id]);});
+  asigSnap.docs.forEach(x=>{const r=x.data();if(normEmail(r.docente)===keyDoc&&normalizarCatalogo('grupos',recordGrupo(r))===keyGrupo&&normalizarCatalogo('grupos',recordMateria(r))===keyMateria)targets.push(['asignaciones',x.id]);});
+  avSnap.docs.forEach(x=>{const r=x.data();if(normEmail(r.docente)===keyDoc&&normalizarCatalogo('grupos',recordGrupo(r))===keyGrupo&&normalizarCatalogo('grupos',recordMateria(r))===keyMateria)targets.push(['avance',x.id]);});
+  for(let i=0;i<targets.length;i+=450){const b=writeBatch(db);targets.slice(i,i+450).forEach(([col,id])=>b.delete(doc(db,col,id)));await b.commit();}
+  return targets.length;
 }
 
 async function vistaAsignacionesGeneral(){
   const d=await obtenerDatosGenerales();
-  const rows=d.asignacionesVisibles.sort((a,b)=>`${a.docente}|${a.grupo}|${a.materia}`.localeCompare(`${b.docente}|${b.grupo}|${b.materia}`));
-  main.innerHTML=`<div class="section-head"><div><h2>Asignaciones</h2><p>Relación real entre docente, grupo, materia y reporte. Si una carga antigua no tiene documento en <code>asignaciones</code>, se muestra desde sus registros para no perder información.</p></div><button id="refAsig">Actualizar</button></div><div class="table-wrap"><table><thead><tr><th>Docente</th><th>Grupo</th><th>Tipo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Reporte</th><th>Origen</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(d.docentes.find(x=>normEmail(x.correo)===normEmail(r.docente))?.nombre||r.docente||'')}</td><td>${esc(r.grupo||'')}</td><td>${esc(r.tipo||'')}</td><td>${esc(r.materia||r.asignatura||'')}</td><td>${Number(r.alumnos)||0}</td><td>${Number(r.filas)||0}</td><td><span class="status ${String(r.estado||'CARGADO').toUpperCase()==='CARGADO'?'ok':'pending'}">${esc(r.estado||'CARGADO')}</span></td><td>${r.url?`<a href="${esc(r.url)}" target="_blank" rel="noopener">Abrir reporte</a>`:'Sin enlace guardado'}</td><td>${esc(r.fuente||'asignacion')}</td></tr>`).join('')||'<tr><td colspan="9" class="empty">No hay cargas ni asignaciones registradas.</td></tr>'}</tbody></table></div>`;
+  const rows=d.asignacionesVisibles.sort((a,b)=>sortText(a.grupo,b.grupo)||sortText(a.docente,b.docente)||sortText(a.materia,b.materia));
+  main.innerHTML=`<div class="section-head"><div><h2>Asignaciones</h2><p>Agrupadas por grupo. Desde aquí el administrador puede eliminar una carga completa para que el docente vuelva a enviar el enlace actualizado.</p></div><button id="refAsig">Actualizar</button></div>
+  <div class="tools"><input id="buscarAsig" placeholder="Buscar grupo, docente o materia..."></div>
+  <div class="cascade-list">${[...new Map(rows.map(r=>[grupoKey(r.grupo,r.tipo),{grupo:r.grupo,tipo:r.tipo,rows:[]}])).values()].map(g=>{
+    const key=grupoKey(g.grupo,g.tipo); rows.filter(r=>grupoKey(r.grupo,r.tipo)===key).forEach(r=>g.rows.push(r));
+    return `<div class="cascade-group"><button type="button" class="cascade-toggle" data-cascade="${esc(key)}"><span>${esc(g.grupo)}</span><small>${esc(g.tipo||'')} · ${g.rows.length} asignaciones</small><b>›</b></button>
+      <div class="cascade-content" data-cascade-detail="${esc(key)}" hidden>${g.rows.sort((a,b)=>sortText(a.docente,b.docente)||sortText(a.materia,b.materia)).map(r=>
+      `<div class="cascade-row assignment-row"><strong>${esc(docenteNombre(d.docentes,r.docente))}</strong><span>${esc(r.materia||r.asignatura||'')}</span><span>${Number(r.alumnos)||0} alumnos</span><span>${Number(r.filas)||0} registros</span><span>${r.url?`<a href="${esc(r.url)}" target="_blank" rel="noopener">Abrir reporte</a>`:'Sin enlace'}</span>${me.rol==='admin'?`<button class="danger" data-delete-load="${esc(cargaKey(r.docente,r.grupo,r.materia))}">Borrar carga</button>`:''}</div>`).join('')}</div></div>`;
+  }).join('')||'<div class="empty">No hay asignaciones registradas.</div>'}</div>`;
   $('refAsig').onclick=()=>vistaAsignacionesGeneral();
+  $('buscarAsig').oninput=e=>{const term=e.target.value.toLowerCase();main.querySelectorAll('.cascade-group').forEach(x=>x.hidden=!x.textContent.toLowerCase().includes(term));};
+  main.querySelectorAll('[data-cascade]').forEach(b=>b.onclick=()=>{const x=main.querySelector(`[data-cascade-detail="${CSS.escape(b.dataset.cascade)}"]`);if(x)x.hidden=!x.hidden;b.classList.toggle('expanded',x?!x.hidden:false);});
+  main.querySelectorAll('[data-delete-load]').forEach(b=>b.onclick=async()=>{
+    const [docente,grupo,materia]=b.dataset.deleteLoad.split('|');
+    if(!confirm(`¿Eliminar TODOS los registros de ${docente}, ${grupo} y ${materia} para que pueda volver a cargar el reporte?`))return;
+    try{
+      const n=await borrarCargaCompleta({docente,grupo,materia});
+      alert(`Se eliminaron ${n} registros relacionados. Pide al docente que vuelva a enviar el enlace.`);
+      vistaAsignacionesGeneral();
+    }catch(e){alert('No se pudo eliminar la carga: '+e.message);}
+  });
 }
 
 async function vistaAvanceGeneral(){
   const d=await obtenerDatosGenerales();
-  main.innerHTML=`<div class="section-head"><div><h2>Avance general</h2><p>Estado y resultados de cada carga por docente, grupo y materia.</p></div></div><div class="table-wrap"><table><thead><tr><th>Docente</th><th>Grupo</th><th>Tipo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Fecha</th></tr></thead><tbody>${d.cargas.map(r=>`<tr><td>${esc(d.docentes.find(x=>normEmail(x.correo)===normEmail(r.docente))?.nombre||r.docente)}</td><td>${esc(r.grupo)}</td><td>${esc(r.tipo||'')}</td><td>${esc(r.materia)}</td><td>${Number(r.alumnos)||0}</td><td>${Number(r.filas)||0}</td><td>${esc(r.estado||'CARGADO')}</td><td>${fecha(r.fecha)}</td></tr>`).join('')||'<tr><td colspan="8" class="empty">No hay avance registrado.</td></tr>'}</tbody></table></div>`;
+  const rows=d.cargas.sort((a,b)=>sortText(a.grupo,b.grupo)||sortText(a.docente,b.docente)||sortText(a.materia,b.materia));
+  const groups=[...new Map(rows.map(r=>[grupoKey(r.grupo,r.tipo),{grupo:r.grupo,tipo:r.tipo,rows:[]}])).values()];
+  rows.forEach(r=>groups.find(g=>grupoKey(g.grupo,g.tipo)===grupoKey(r.grupo,r.tipo))?.rows.push(r));
+  main.innerHTML=`<div class="section-head"><div><h2>Avance general</h2><p>Seguimiento agrupado por grupo y, al desplegar, por docente y materia.</p></div></div>
+  <div class="cascade-list">${groups.map(g=>{const key=grupoKey(g.grupo,g.tipo);return `<div class="cascade-group"><button type="button" class="cascade-toggle" data-cascade="${esc(key)}"><span>${esc(g.grupo)}</span><small>${esc(g.tipo||'')} · ${g.rows.length} cargas</small><b>›</b></button><div class="cascade-content" data-cascade-detail="${esc(key)}" hidden>${g.rows.sort((a,b)=>sortText(a.docente,b.docente)||sortText(a.materia,b.materia)).map(r=>`<div class="cascade-row"><strong>${esc(docenteNombre(d.docentes,r.docente))}</strong><span>${esc(r.materia)}</span><span>${Number(r.alumnos)||0} alumnos</span><span>${Number(r.filas)||0} registros</span><span>${esc(r.estado||'CARGADO')}</span><span>${fecha(r.fecha)}</span></div>`).join('')}</div></div>`}).join('')||'<div class="empty">No hay avance registrado.</div>'}</div>`;
+  main.querySelectorAll('[data-cascade]').forEach(b=>b.onclick=()=>{const x=main.querySelector(`[data-cascade-detail="${CSS.escape(b.dataset.cascade)}"]`);if(x)x.hidden=!x.hidden;b.classList.toggle('expanded',x?!x.hidden:false);});
 }
 
 async function vistaMisAsignaciones(){
