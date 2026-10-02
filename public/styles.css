@@ -1399,3 +1399,8 @@ body:not(:has(#login)) .install-btn:hover{
   .cascade-toggle small{grid-column:1}
   .cascade-row,.assignment-row{grid-template-columns:1fr}
 }
+
+/* Vistas personales del docente */
+.assignment-row{align-items:center}
+.cascade-row a{font-weight:700}
+@media(max-width:800px){.assignment-row{align-items:flex-start;flex-direction:column;gap:5px}}
