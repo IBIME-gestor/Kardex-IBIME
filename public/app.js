@@ -354,11 +354,11 @@ async function vistaDashboard() {
   const total=ds.reduce((s,a)=>s+(Number(a.filas)||0),0);
   const alumnos=new Set(); ds.forEach(a=>alumnosMap.get(`${normalizarCatalogo('grupos',a.grupo)}|${normalizarCatalogo('grupos',a.materia)}`)?.forEach(x=>alumnos.add(x)));
   main.innerHTML=`<div class="perfil">${me.foto?`<img src="${esc(me.foto)}" alt="Foto">`:''}<div><h2>Hola, ${esc(me.nombre)}</h2><p>${esc(me.email)} · ${esc(me.rol)}</p></div></div>
-    <div class="cards"><div><b>${ds.length}</b><span>Cargas realizadas</span></div><div><b>${alumnos.size}</b><span>Alumnos detectados</span></div><div><b>${total}</b><span>Registros importados</span></div><div><b>${cal.length}</b><span>Calificaciones</span></div></div>
-    <div class="acciones"><button class="p" id="nueva">+ Cargar nuevo reporte</button></div>
+    <div class="cards dashboard-cards"><button class="dash-card" type="button" data-go="misAsignaciones"><b>${ds.length}</b><span>Mis asignaciones</span><small>Grupos y materias registradas</small><i>›</i></button><button class="dash-card" type="button" data-go="miAvance"><b>${ds.filter(a=>Number(a.filas)>0).length}</b><span>Mis cargas</span><small>Reportes con información</small><i>›</i></button><button class="dash-card" type="button" data-go="miAvance"><b>${Math.max(0,ds.length-ds.filter(a=>Number(a.filas)>0).length)}</b><span>Pendientes</span><small>Asignaciones sin registros</small><i>›</i></button><button class="dash-card" type="button" data-go="miAvance"><b>${total}</b><span>Registros importados</span><small>Solo tus propios registros</small><i>›</i></button></div>
+    <div class="acciones"><button class="p" id="nueva">+ Cargar nuevo reporte</button><button id="verAsig">Ver mis asignaciones</button><button id="verAvance">Ver mi avance</button></div>
     <section class="dashboard-section"><div class="section-title"><div><h3>Mis grupos cargados</h3><p>Consulta tu información y avance por grupo.</p></div></div>
     ${ds.length?`<div class="table-wrap"><table><thead><tr><th>Grupo</th><th>Tipo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Fecha</th></tr></thead><tbody>${ds.map(a=>`<tr><td><strong>${esc(a.grupo)}</strong></td><td>${esc(a.tipo||'')}</td><td>${esc(a.materia)}</td><td>${Number(a.alumnos)||0}</td><td><strong>${Number(a.filas)||0}</strong></td><td><span class="status ${String(a.estado||'CARGADO').toUpperCase()==='CARGADO'?'ok':'pending'}">${esc(a.estado||'CARGADO')}</span></td><td>${fecha(a.fecha||a.actualizado)}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">Todavía no hay cargas asociadas a tu cuenta.</div>'}</section>`;
-  $('nueva').onclick=()=>ir('importar');
+  main.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>ir(b.dataset.go)); $('nueva').onclick=()=>ir('importar'); $('verAsig').onclick=()=>ir('misAsignaciones'); $('verAvance').onclick=()=>ir('miAvance');
 }
 async function vistaImportar() {
   await auth.currentUser?.getIdToken(true);
@@ -894,13 +894,28 @@ async function vistaAvanceGeneral(){
   main.querySelectorAll('[data-cascade]').forEach(b=>b.onclick=()=>{const x=main.querySelector(`[data-cascade-detail="${CSS.escape(b.dataset.cascade)}"]`);if(x)x.hidden=!x.hidden;b.classList.toggle('expanded',x?!x.hidden:false);});
 }
 
-async function vistaMisAsignaciones(){
+async function obtenerMisDatos(){
   const d=await obtenerDatosGenerales();
-  const rows=d.asignacionesVisibles.filter(r=>normEmail(r.docente)===normEmail(me.email));
-  main.innerHTML=`<h2>Mis asignaciones</h2><p>Estas son las combinaciones de grupo y materia que tienes registradas. Las cargas antiguas también aparecen aunque su documento de asignación no exista.</p>${rows.length?`<div class="table-wrap"><table><thead><tr><th>Grupo</th><th>Tipo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Reporte</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(r.grupo)}</td><td>${esc(r.tipo||'')}</td><td>${esc(r.materia)}</td><td>${Number(r.alumnos)||0}</td><td>${Number(r.filas)||0}</td><td>${esc(r.estado||'CARGADO')}</td><td>${r.url?`<a href="${esc(r.url)}" target="_blank" rel="noopener">Abrir</a>`:'—'}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">Aún no tienes asignaciones ni cargas registradas.</div>'}`;
+  const asignaciones=d.asignacionesVisibles.filter(r=>normEmail(r.docente)===normEmail(me.email));
+  const cargas=d.cargas.filter(r=>normEmail(r.docente)===normEmail(me.email));
+  const porClave=new Map();
+  [...asignaciones,...cargas].forEach(r=>{const key=cargaKey(r.docente,r.grupo,r.materia);porClave.set(key,{...porClave.get(key),...r,docente:me.email});});
+  return {d,rows:[...porClave.values()].sort((a,b)=>sortText(a.grupo,b.grupo)||sortText(a.materia,b.materia))};
+}
+async function vistaMisAsignaciones(){
+  const {rows}=await obtenerMisDatos();
+  const grupos=[...new Map(rows.map(r=>[grupoKey(r.grupo,r.tipo),{grupo:r.grupo,tipo:r.tipo,rows:[]}])).values()];
+  rows.forEach(r=>grupos.find(g=>grupoKey(g.grupo,g.tipo)===grupoKey(r.grupo,r.tipo))?.rows.push(r));
+  main.innerHTML=`<div class="section-head"><div><h2>Mis asignaciones</h2><p>Solo aparecen tus grupos y materias. Despliega un grupo para revisar qué ya cargaste y qué te falta completar.</p></div><button id="refMisAsig">Actualizar</button></div><div class="cascade-list">${grupos.map(g=>{const key=grupoKey(g.grupo,g.tipo);return `<div class="cascade-group"><button type="button" class="cascade-toggle" data-cascade="${esc(key)}"><span>${esc(g.grupo)}</span><small>${esc(g.tipo||'')} · ${g.rows.length} materias</small><b>›</b></button><div class="cascade-content" data-cascade-detail="${esc(key)}" hidden>${g.rows.sort((a,b)=>sortText(a.materia,b.materia)).map(r=>{const cargado=Number(r.filas)>0||String(r.estado||'').toUpperCase()==='CARGADO';return `<div class="cascade-row assignment-row"><strong>${esc(r.materia)}</strong><span>${Number(r.alumnos)||0} alumnos</span><span>${Number(r.filas)||0} registros</span><span class="status ${cargado?'ok':'pending'}">${cargado?'CARGADO':'PENDIENTE'}</span><span>${r.url?`<a href="${esc(r.url)}" target="_blank" rel="noopener">Abrir reporte</a>`:'Sin enlace'}</span></div>`}).join('')}</div></div>`}).join('')||'<div class="empty">Todavía no tienes asignaciones registradas.</div>'}</div>`;
+  $('refMisAsig').onclick=()=>vistaMisAsignaciones();
+  main.querySelectorAll('[data-cascade]').forEach(b=>b.onclick=()=>{const x=main.querySelector(`[data-cascade-detail="${CSS.escape(b.dataset.cascade)}"]`);if(x)x.hidden=!x.hidden;b.classList.toggle('expanded',x?!x.hidden:false);});
 }
 async function vistaMiAvance(){
-  const d=await obtenerDatosGenerales();
-  const rows=d.cargas.filter(r=>normEmail(r.docente)===normEmail(me.email));
-  main.innerHTML=`<h2>Mi avance</h2><div class="table-wrap"><table><thead><tr><th>Grupo</th><th>Tipo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Fecha</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(r.grupo)}</td><td>${esc(r.tipo||'')}</td><td>${esc(r.materia)}</td><td>${Number(r.alumnos)||0}</td><td>${Number(r.filas)||0}</td><td>${esc(r.estado||'CARGADO')}</td><td>${fecha(r.fecha)}</td></tr>`).join('')||'<tr><td colspan="7" class="empty">No hay cargas registradas.</td></tr>'}</tbody></table></div>`;
+  const {rows}=await obtenerMisDatos();
+  const total=rows.length, cargadas=rows.filter(r=>Number(r.filas)>0||String(r.estado||'').toUpperCase()==='CARGADO').length, registros=rows.reduce((s,r)=>s+(Number(r.filas)||0),0);
+  const grupos=[...new Map(rows.map(r=>[grupoKey(r.grupo,r.tipo),{grupo:r.grupo,tipo:r.tipo,rows:[]}])).values()];
+  rows.forEach(r=>grupos.find(g=>grupoKey(g.grupo,g.tipo)===grupoKey(r.grupo,r.tipo))?.rows.push(r));
+  main.innerHTML=`<div class="section-head"><div><h2>Mi avance</h2><p>Resumen de tus propios reportes. No muestra información de otros docentes.</p></div><button id="refMiAvance">Actualizar</button></div><div class="cards dashboard-cards"><div class="dash-card"><b>${total}</b><span>Mis asignaciones</span><small>Grupos y materias registradas</small></div><div class="dash-card"><b>${cargadas}</b><span>Ya cargadas</span><small>Reportes con información</small></div><div class="dash-card"><b>${Math.max(0,total-cargadas)}</b><span>Pendientes</span><small>Asignaciones sin carga detectada</small></div><div class="dash-card"><b>${registros}</b><span>Registros</span><small>Información que ya subiste</small></div></div><div class="cascade-list">${grupos.map(g=>{const key=grupoKey(g.grupo,g.tipo);return `<div class="cascade-group"><button type="button" class="cascade-toggle" data-cascade="${esc(key)}"><span>${esc(g.grupo)}</span><small>${esc(g.tipo||'')} · ${g.rows.filter(r=>Number(r.filas)>0||String(r.estado||'').toUpperCase()==='CARGADO').length}/${g.rows.length} cargadas</small><b>›</b></button><div class="cascade-content" data-cascade-detail="${esc(key)}" hidden>${g.rows.sort((a,b)=>sortText(a.materia,b.materia)).map(r=>{const cargado=Number(r.filas)>0||String(r.estado||'').toUpperCase()==='CARGADO';return `<div class="cascade-row"><strong>${esc(r.materia)}</strong><span>${Number(r.alumnos)||0} alumnos</span><span>${Number(r.filas)||0} registros</span><span class="status ${cargado?'ok':'pending'}">${cargado?'CARGADO':'PENDIENTE'}</span><span>${fecha(r.fecha||r.actualizado)}</span></div>`}).join('')}</div></div>`}).join('')||'<div class="empty">No hay información cargada todavía.</div>'}</div>`;
+  $('refMiAvance').onclick=()=>vistaMiAvance();
+  main.querySelectorAll('[data-cascade]').forEach(b=>b.onclick=()=>{const x=main.querySelector(`[data-cascade-detail="${CSS.escape(b.dataset.cascade)}"]`);if(x)x.hidden=!x.hidden;b.classList.toggle('expanded',x?!x.hidden:false);});
 }
