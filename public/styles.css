@@ -1301,3 +1301,101 @@ body:not(:has(#login)) .install-btn:hover{
 }
 @media(max-width:1100px){.dashboard-cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:700px){.dashboard-cards{grid-template-columns:1fr}.dashboard-section{padding:12px}.section-title{flex-direction:column}}
+
+
+/* =========================
+   DASHBOARD LIMPIO / CASCADA
+   ========================= */
+.dashboard-cards{
+  grid-template-columns:repeat(4,minmax(0,1fr));
+}
+.dash-card{
+  position:relative;
+  text-align:left;
+  min-height:116px;
+  padding:18px 38px 16px 18px;
+  border:1px solid rgba(223,231,238,.95);
+  background:rgba(255,255,255,.97);
+  box-shadow:var(--shadow-sm);
+  display:flex;
+  flex-direction:column;
+  align-items:flex-start;
+}
+.dash-card:hover{border-color:#b8cfdf;background:#fff}
+.dash-card b{font-size:27px;color:var(--brand);line-height:1}
+.dash-card span{font-size:13px;font-weight:800;margin-top:9px}
+.dash-card small{font-size:11px;color:var(--muted);margin-top:4px}
+.dash-card i{position:absolute;right:16px;top:50%;font-size:28px;color:var(--brand);font-style:normal;transform:translateY(-50%)}
+
+.clickable-row{cursor:pointer}
+.clickable-row:hover td{background:#f7fbfe}
+.clickable-row.expanded td{background:#eef6fb}
+.cascade-detail td{padding:0!important;border-bottom:1px solid var(--border)}
+.cascade-box{
+  padding:12px 16px 14px 42px;
+  background:#f8fbfd;
+  display:grid;
+  gap:7px;
+}
+.cascade-row{
+  display:grid;
+  grid-template-columns:minmax(160px,1.4fr) minmax(130px,1fr) repeat(3,minmax(80px,.7fr));
+  gap:10px;
+  align-items:center;
+  padding:9px 11px;
+  border:1px solid #e2ebf1;
+  border-radius:9px;
+  background:#fff;
+  font-size:12px;
+}
+.cascade-row span{color:var(--muted)}
+.doc-detail-head{display:flex;justify-content:space-between;gap:15px;padding:2px 3px 8px;color:var(--brand)}
+.cascade-list{display:grid;gap:8px}
+.cascade-group{border:1px solid var(--border);border-radius:11px;background:#fff;overflow:hidden}
+.cascade-toggle{
+  width:100%;
+  display:grid;
+  grid-template-columns:minmax(180px,1fr) auto 24px;
+  align-items:center;
+  text-align:left;
+  gap:12px;
+  border:0;
+  border-radius:0;
+  background:#fff;
+  padding:12px 15px;
+  box-shadow:none;
+}
+.cascade-toggle:hover{background:#f7fbfe;box-shadow:none;transform:none}
+.cascade-toggle span{font-weight:850;color:var(--brand)}
+.cascade-toggle small{color:var(--muted)}
+.cascade-toggle b{font-size:23px;font-weight:500;transition:transform .15s}
+.cascade-toggle.expanded b{transform:rotate(90deg)}
+.cascade-content{padding:8px 10px 10px;background:#f7fafc;border-top:1px solid var(--border)}
+.assignment-row{grid-template-columns:minmax(150px,1.25fr) minmax(120px,1fr) repeat(3,minmax(75px,.7fr)) auto}
+.assignment-row button{padding:7px 9px;font-size:11px}
+
+.catalog-table table{font-size:12px}
+.catalog-table th,.catalog-table td{padding:7px 9px}
+.catalog-table tbody tr{height:35px}
+.catalog-table .actions button{padding:6px 9px;font-size:11px}
+
+.check-wide{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  margin:14px 0;
+  font-weight:750;
+}
+.check-wide input{width:auto}
+
+@media(max-width:1000px){
+  .dashboard-cards{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .cascade-row{grid-template-columns:1fr 1fr}
+  .assignment-row{grid-template-columns:1fr 1fr}
+}
+@media(max-width:650px){
+  .dashboard-cards{grid-template-columns:1fr}
+  .cascade-toggle{grid-template-columns:1fr 22px}
+  .cascade-toggle small{grid-column:1}
+  .cascade-row,.assignment-row{grid-template-columns:1fr}
+}
