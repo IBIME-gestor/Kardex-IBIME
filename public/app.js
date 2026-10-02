@@ -26,7 +26,7 @@ const PRIVILEGES = {
 };
 const DIRECTIVO_DEFAULTS = Object.keys(PRIVILEGES);
 const allPrivs = () => Object.keys(PRIVILEGES);
-const hasPriv = p => me?.rol === 'admin' || (me?.rol === 'directivo' && Array.isArray(me?.permisos) && me.permisos.includes(p));
+const hasPriv = p => me?.rol === 'admin' || (me?.rol === 'directivo' && ((Array.isArray(me?.permisos) && me.permisos.includes(p)) || (Array.isArray(me?.privilegios) && me.privilegios.includes(p))));
 const canOpen = k => me?.rol === 'admin' || ({
   dashboard: hasPriv('dashboardGeneral'),
   cargasPanel: hasPriv('cargas'),
@@ -109,7 +109,8 @@ onAuthStateChanged(auth, async u => {
         nombre: data.nombre || u.displayName || email,
         foto: data.foto || u.photoURL || '',
         rol,
-        permisos: Array.isArray(data.permisos) ? data.permisos : []
+        permisos: Array.isArray(data.permisos) ? data.permisos : (Array.isArray(data.privilegios) ? data.privilegios : []),
+        privilegios: Array.isArray(data.privilegios) ? data.privilegios : []
       };
       // Conserva/actualiza la foto pública de Google para identificar al docente/directivo.
       if (!data.foto && u.photoURL && (rol === 'docente' || rol === 'directivo')) {
@@ -808,7 +809,7 @@ async function vistaDocentesPanel(){
 async function editarDocente(correo){
   const data=correo ? (await getDoc(doc(db,'docentes',correo))).data() || {} : {};
   const isAdmin = correo && normEmail(correo)===normEmail(ADMIN_EMAIL);
-  const permisos=Array.isArray(data.permisos)?data.permisos:[];
+  const permisos=Array.isArray(data.permisos)?data.permisos:(Array.isArray(data.privilegios)?data.privilegios:[]);
   main.innerHTML=`<div class="editor"><h2>${correo?'Editar docente/directivo':'Nuevo docente/directivo'}</h2><div class="form-grid">
     <label>Correo<input id="edCorreo" value="${esc(correo||'')}" ${correo?'readonly':''}></label>
     <label>Nombre<input id="edNombre" value="${esc(data.nombre||'')}"></label>
@@ -819,7 +820,14 @@ async function editarDocente(correo){
   <div class="actions"><button id="cancelEd">Cancelar</button><button class="p" id="saveEd">Guardar perfil</button></div></div>`;
   $('cancelEd').onclick=()=>vistaDocentesPanel();
   $('saveEd').onclick=async()=>{
-    const em=normEmail($('edCorreo').value), rol=isAdmin?'admin':$('edRol').value, priv=[...document.querySelectorAll('.priv-check:checked')].map(x=>x.value);
+    const em=normEmail($('edCorreo').value);
+    const seleccionados=[...document.querySelectorAll('.priv-check:checked')].map(x=>x.value);
+    const rolSeleccionado=$('edRol').value;
+    // Si se asignan privilegios a un perfil que todavía aparece como docente,
+    // lo convertimos automáticamente en directivo para evitar que la cuenta
+    // siga entrando al portal con la vista de docente.
+    const rol=isAdmin?'admin':(rolSeleccionado==='docente' && seleccionados.length ? 'directivo' : rolSeleccionado);
+    const priv=seleccionados;
     if(!em || !em.endsWith('@'+DOMINIO)) return alert('Usa un correo @ibime.edu.mx.');
     if(rol==='directivo' && !priv.length) return alert('Selecciona al menos un privilegio para el directivo.');
     try{ await setDoc(doc(db,'docentes',em),normalizarGuardado({correo:em,nombre:$('edNombre').value.trim(),foto:$('edFoto').value.trim(),rol,permisos:rol==='admin'?allPrivs():priv,bloqueado:isAdmin?false:$('edBloqueado').checked,actualizado:serverTimestamp()}),{merge:true}); alert('Perfil actualizado.'); vistaDocentesPanel(); }catch(e){alert('No se pudo guardar: '+e.message);}
