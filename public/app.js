@@ -26,27 +26,63 @@ $('out').onclick = () => signOut(auth);
 onAuthStateChanged(auth, async u => {
   $('out').hidden = !u; $('nav').innerHTML = '';
   if (!u) { me = null; return; }
-  const email = normEmail(u.email);
-  if (!email.endsWith('@' + DOMINIO)) return bloqueo('Usa tu cuenta @' + DOMINIO);
-  const admin = email === ADMIN_EMAIL.toLowerCase();
-  let d;
-  try { d = await getDoc(doc(db, 'docentes', email)); } catch (e) { return bloqueo('No se pudo consultar tu perfil: ' + e.message); }
 
-  if (admin) {
-    const perfil = { correo: email, nombre: u.displayName || 'Administrador IBIME', foto: u.photoURL || '', rol: 'admin', actualizado: serverTimestamp() };
-    await setDoc(doc(db, 'docentes', email), normalizarGuardado(perfil), { merge: true });
-    me = { email, nombre: perfil.nombre, foto: perfil.foto, rol: 'admin' };
-  } else {
-    if (!d.exists()) {
-      const perfil = { correo: email, nombre: u.displayName || email.split('@')[0], foto: u.photoURL || '', rol: 'docente', fechaAlta: serverTimestamp(), actualizado: serverTimestamp() };
-      try { await setDoc(doc(db, 'docentes', email), normalizarGuardado(perfil)); d = await getDoc(doc(db, 'docentes', email)); }
-      catch (e) { return bloqueo('No se pudo crear tu perfil de docente: ' + e.message); }
+  try {
+    // Fuerza un token fresco antes de consultar reglas de Firestore y antes de
+    // enviarlo al puente de Google Sheets. Esto evita trabajar con una sesión
+    // antigua después de cambiar de cuenta.
+    await u.getIdToken(true);
+    const email = normEmail(u.email);
+    if (!email.endsWith('@' + DOMINIO)) return bloqueo('Usa tu cuenta @' + DOMINIO);
+    if (u.emailVerified === false) return bloqueo('Tu cuenta de Google debe estar verificada.');
+
+    const admin = email === ADMIN_EMAIL.toLowerCase();
+    const perfilRef = doc(db, 'docentes', email);
+    let d = await getDoc(perfilRef);
+
+    if (admin) {
+      const perfil = {
+        correo: email,
+        nombre: u.displayName || 'Administrador IBIME',
+        foto: u.photoURL || '',
+        rol: 'admin',
+        actualizado: serverTimestamp()
+      };
+      await setDoc(perfilRef, normalizarGuardado(perfil), { merge: true });
+      me = { email, nombre: perfil.nombre, foto: perfil.foto, rol: 'admin' };
+    } else {
+      if (!d.exists()) {
+        const perfil = {
+          correo: email,
+          nombre: u.displayName || email.split('@')[0],
+          foto: u.photoURL || '',
+          rol: 'docente',
+          fechaAlta: serverTimestamp(),
+          actualizado: serverTimestamp()
+        };
+        await setDoc(perfilRef, normalizarGuardado(perfil));
+        d = await getDoc(perfilRef);
+      }
+
+      const data = d.data() || {};
+      const rol = String(data.rol || '').trim().toLowerCase();
+      if (!['docente', 'admin'].includes(rol)) {
+        return bloqueo('Tu cuenta no tiene un rol de docente válido. Contacta al administrador.');
+      }
+      me = {
+        email,
+        nombre: data.nombre || u.displayName || email,
+        foto: data.foto || u.photoURL || '',
+        rol
+      };
     }
-    const data = d.data();
-    if (data.rol !== 'docente') return bloqueo('Tu cuenta no tiene un rol de docente válido. Contacta al administrador.');
-    me = { email, nombre: data.nombre || u.displayName || email, foto: data.foto || u.photoURL || '', rol: 'docente' };
+
+    menu();
+    await ir('dashboard');
+  } catch (e) {
+    console.error('Error al inicializar sesión', e);
+    bloqueo(`No se pudo iniciar tu sesión académica. ${e.code || ''} ${e.message || ''}`.trim());
   }
-  menu(); ir('dashboard');
 });
 
 const bloqueo = m => { main.innerHTML = `<div id="login"><p class="msg">${esc(m)}</p></div>`; };
@@ -60,11 +96,16 @@ function menu() {
 }
 function ir(k) {
   document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('on', b.dataset.k === k));
-  if (k === 'dashboard') return vistaDashboard();
-  if (k === 'importar') return vistaImportar();
-  if (k === 'misAsignaciones') return vistaMisAsignaciones();
-  if (k === 'miAvance') return vistaMiAvance();
-  return vistaTab(k);
+  const action = k === 'dashboard' ? vistaDashboard
+    : k === 'importar' ? vistaImportar
+    : k === 'misAsignaciones' ? vistaMisAsignaciones
+    : k === 'miAvance' ? vistaMiAvance
+    : () => vistaTab(k);
+  return Promise.resolve().then(action).catch(e => {
+    console.error('Error en la vista', k, e);
+    main.innerHTML = `<div class="empty"><h3>No se pudo cargar esta sección</h3><p>${esc(e?.message || 'Error desconocido')}</p><button id="reintentar" class="p">Reintentar</button></div>`;
+    $('reintentar').onclick = () => ir(k);
+  });
 }
 
 function fecha(v) { if (!v) return ''; if (typeof v.toDate === 'function') return v.toDate().toLocaleString('es-MX'); return String(v); }
@@ -100,8 +141,12 @@ async function vistaDashboard() {
 }
 
 async function vistaImportar() {
+  await auth.currentUser?.getIdToken(true);
   const [rows, gruposES, gruposEN, mats] = await Promise.all([
-    getCatalog('asignaciones', ['docente','==',me.email]), getCatalog('grupos',['tipo','==','ESPAÑOL']), getCatalog('grupos',['tipo','==','INGLES']), getCatalog('asignaturas')
+    getCatalog('asignaciones', ['docente','==',me.email]),
+    getCatalog('grupos',['tipo','==','ESPAÑOL']),
+    getCatalog('grupos',['tipo','==','INGLES']),
+    getCatalog('asignaturas')
   ]);
   const grupos = [...gruposES.map(x => ({...x, tipo:'ESPAÑOL'})), ...gruposEN.map(x => ({...x, tipo:'INGLES'}))];
   main.innerHTML = `<h2>Cargar reportes de Classroom</h2><p>Selecciona grupo, materia y pega el enlace del reporte. Las filas anteriores quedan guardadas y pueden editarse.</p><div id="filas"></div>
@@ -109,18 +154,43 @@ async function vistaImportar() {
   const add = (g = '', m = '', u = '', tipo = '') => {
     const d = document.createElement('div'); d.className = 'fila carga-row';
     d.innerHTML = `<select class="tipo"><option value="">TIPO</option><option value="ESPAÑOL" ${String(tipo).toUpperCase()==='ESPAÑOL'?'selected':''}>ESPAÑOL</option><option value="INGLES" ${String(tipo).toUpperCase()==='INGLES'?'selected':''}>INGLES</option></select>
-      <select class="g"><option value="">Grupo</option></select><select class="m"><option value="">Materia</option>${options(mats.map(x=>x.nombre),m)}</select>
+      <select class="g"><option value="">Grupo</option></select><select class="m"><option value="">Materia</option>${options(mats.map(x => x.nombre),m)}</select>
       <input class="u" placeholder="Pegar enlace de Google Sheets" value="${esc(u)}"><button class="danger quitar">Quitar</button>`;
-    $('filas').append(d); const sync = () => { const tg = d.querySelector('.tipo').value; const gs = grupos.filter(x => String(x.tipo || '').toUpperCase() === String(tg || '').toUpperCase()).map(x => x.nombre); d.querySelector('.g').innerHTML = `<option value="">Grupo</option>${options(gs,g)}`; };
-    d.querySelector('.tipo').onchange = sync; d.querySelector('.quitar').onclick = () => d.remove(); sync();
+    $('filas').append(d);
+    const sync = () => {
+      const tg = d.querySelector('.tipo').value;
+      const gs = grupos.filter(x => String(x.tipo || '').toUpperCase() === String(tg || '').toUpperCase()).map(x => x.nombre);
+      d.querySelector('.g').innerHTML = `<option value="">Grupo</option>${options(gs,g)}`;
+    };
+    d.querySelector('.tipo').onchange = sync;
+    d.querySelector('.quitar').onclick = () => d.remove();
+    sync();
   };
-  rows.forEach(r => add(r.grupo, r.materia, r.url || '', r.tipo || (gruposES.some(x=>normalizarCatalogo('grupos',x.nombre)===normalizarCatalogo('grupos',r.grupo))?'ESPAÑOL':'INGLES'))); if (!rows.length) add();
-  $('mas').onclick = () => add(); $('go').onclick = importar;
+  rows.forEach(r => add(r.grupo, r.materia, r.url || '', r.tipo || (gruposES.some(x=>normalizarCatalogo('grupos',x.nombre)===normalizarCatalogo('grupos',r.grupo))?'ESPAÑOL':'INGLES')));
+  if (!rows.length) add();
+  $('mas').onclick = () => add();
+  $('go').onclick = importar;
 }
 
 async function leer(url) {
-  const r = await fetch(BRIDGE_URL, { method:'POST', headers:{'Content-Type':'text/plain'}, body:JSON.stringify({idToken:await auth.currentUser.getIdToken(),url}) });
-  const j = await r.json(); if (!j.ok) throw new Error(j.error); return j.datos;
+  if (!BRIDGE_URL || !/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec$/.test(BRIDGE_URL)) {
+    throw new Error('El puente de Google Sheets no está configurado. Revisa BRIDGE_URL en public/config.js.');
+  }
+  const cleanUrl = String(url || '').trim();
+  if (!/https?:\/\/(docs\.google\.com|drive\.google\.com)\//i.test(cleanUrl)) {
+    throw new Error('El enlace no parece ser de Google Drive/Google Sheets.');
+  }
+  const token = await auth.currentUser.getIdToken(true);
+  const r = await fetch(BRIDGE_URL, {
+    method:'POST',
+    headers:{'Content-Type':'text/plain;charset=utf-8'},
+    body:JSON.stringify({idToken:token,url:cleanUrl})
+  });
+  if (!r.ok) throw new Error(`El puente respondió HTTP ${r.status}.`);
+  const j = await r.json();
+  if (!j.ok) throw new Error(j.error || 'El puente no pudo leer el reporte.');
+  if (!Array.isArray(j.datos) || !j.datos.length) throw new Error('El reporte está vacío.');
+  return j.datos;
 }
 
 function parsear(d, it) {
@@ -142,6 +212,23 @@ function parsear(d, it) {
 
 async function importar(){
   const log=m=>$('log').textContent+=m+'\n'; $('log').textContent=''; $('go').disabled=true;
+  // Revalida el perfil antes de escribir. Evita el fallo de permisos cuando
+  // la cuenta inició sesión antes de que su documento de docente existiera.
+  try {
+    await auth.currentUser?.getIdToken(true);
+    const perfilRef = doc(db, 'docentes', me.email);
+    const perfilSnap = await getDoc(perfilRef);
+    const rol = String(perfilSnap.data()?.rol || '').trim().toLowerCase();
+    if (!perfilSnap.exists() || !['docente','admin'].includes(rol)) {
+      log('❌ Tu cuenta no tiene un perfil docente válido en Firestore.');
+      log(`Correo: ${me.email}`);
+      log('El administrador debe confirmar este correo en Firestore > docentes y usar rol "docente".');
+      $('go').disabled=false; return;
+    }
+  } catch(e) {
+    log(`❌ No se pudo validar el perfil: ${e.code || 'error'} — ${e.message}`);
+    $('go').disabled=false; return;
+  }
   const vistos=new Set(),items=[];
   document.querySelectorAll('.carga-row').forEach(d=>{const it={tipo:d.querySelector('.tipo').value,grupo:d.querySelector('.g').value.trim(),materia:d.querySelector('.m').value.trim(),url:d.querySelector('.u').value.trim()};if(it.grupo&&it.materia&&it.url&&!vistos.has(it.url)){vistos.add(it.url);items.push(it);}});
   if(!items.length){log('No hay filas completas. Selecciona tipo, grupo, materia y enlace.');$('go').disabled=false;return;}
@@ -151,15 +238,36 @@ async function importar(){
   for(const r of res){
     if(r.err){log(`❌ ${r.it.grupo}: ${r.err}`);continue;}
     const {rows,alumnos}=r.parsed;
-    for(let i=0;i<rows.length;i+=450){const b=writeBatch(db);rows.slice(i,i+450).forEach(x=>b.set(doc(db,'calificaciones',hash([x.grupo,x.asignatura,x.correo,x.actividad,x.fecha].join('|'))),normalizarGuardado(x),{merge:true}));await b.commit();}
-    for(const a of alumnos){await setDoc(doc(db,'alumnos',a.correo),normalizarGuardado({correo:a.correo,nombre:a.nombre,grupos:arrayUnion(String(a.grupo||'').trim().replace(/\s+/g,' ').toUpperCase()),ultimoDocente:me.email,actualizado:serverTimestamp()}),{merge:true});}
-    const aid=hash([me.email,r.it.grupo,r.it.materia].join('|'));
-    await setDoc(doc(db,'asignaciones',aid),normalizarGuardado({docente:me.email,nombre:me.nombre,grupo:r.it.grupo,materia:r.it.materia,tipo:r.it.tipo||'CLASSROOM',url:r.it.url,actualizado:serverTimestamp()}),{merge:true});
-    await setDoc(doc(db,'avance',aid),normalizarGuardado({docente:me.email,nombre:me.nombre,grupo:r.it.grupo,asignatura:r.it.materia,filas:rows.length,alumnos:alumnos.length,url:r.it.url,estado:'CARGADO',fecha:serverTimestamp()}),{merge:true});
-    total+=rows.length; log(`✅ ${r.it.grupo} · ${r.it.materia}: ${rows.length} registros · ${alumnos.length} alumnos`);
+    try {
+      if(rows.length){
+        for(let i=0;i<rows.length;i+=450){
+          const b=writeBatch(db);
+          rows.slice(i,i+450).forEach(x=>b.set(doc(db,'calificaciones',hash([me.email,x.grupo,x.asignatura,x.correo,x.actividad,x.fecha].join('|'))),normalizarGuardado(x),{merge:true}));
+          await b.commit();
+        }
+      }
+      log(`✓ Calificaciones guardadas: ${rows.length}`);
+      for(const a of alumnos){
+        await setDoc(doc(db,'alumnos',a.correo),normalizarGuardado({correo:a.correo,nombre:a.nombre,grupos:arrayUnion(String(a.grupo||'').trim().replace(/\s+/g,' ').toUpperCase()),ultimoDocente:me.email,actualizado:serverTimestamp()}),{merge:true});
+      }
+      log(`✓ Alumnos actualizados: ${alumnos.length}`);
+      const aid=hash([me.email,r.it.grupo,r.it.materia].join('|'));
+      await setDoc(doc(db,'asignaciones',aid),normalizarGuardado({docente:me.email,nombre:me.nombre,grupo:r.it.grupo,materia:r.it.materia,tipo:r.it.tipo||'CLASSROOM',url:r.it.url,actualizado:serverTimestamp()}),{merge:true});
+      log('✓ Asignación guardada');
+      await setDoc(doc(db,'avance',aid),normalizarGuardado({docente:me.email,nombre:me.nombre,grupo:r.it.grupo,asignatura:r.it.materia,filas:rows.length,alumnos:alumnos.length,url:r.it.url,estado:'CARGADO',fecha:serverTimestamp()}),{merge:true});
+      log('✓ Avance guardado');
+      total+=rows.length; log(`✅ ${r.it.grupo} · ${r.it.materia}: ${rows.length} registros · ${alumnos.length} alumnos`);
+    } catch(e) {
+      console.error('Error Firestore al importar', e, r.it);
+      log(`❌ FIRESTORE en ${r.it.grupo} · ${r.it.materia}: ${e.code || 'error'} — ${e.message}`);
+      log('Revisa que tu correo tenga un documento en Firestore > docentes con rol "docente" y que las reglas publicadas sean las del proyecto.');
+    }
   }
-  log(`Listo, ${me.nombre||me.email}. ${total} registros guardados.`);$('go').disabled=false;
+  if (total === 0) log(`⚠️ No se guardaron calificaciones. Revisa los errores anteriores.`);
+  else log(`Listo, ${me.nombre||me.email}. ${total} registros guardados.`);
+  $('go').disabled=false;
 }
+
 
 async function guardar(t, objs){
   for(let i=0;i<objs.length;i+=450){
