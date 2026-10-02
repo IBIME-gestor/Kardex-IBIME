@@ -429,9 +429,15 @@ async function importar(){
   document.querySelectorAll('.carga-row').forEach(d=>{const it={tipo:d.querySelector('.tipo').value,grupo:d.querySelector('.g').value.trim(),materia:d.querySelector('.m').value.trim(),url:d.querySelector('.u').value.trim()};if(it.grupo&&it.materia&&it.url&&!vistos.has(it.url)){vistos.add(it.url);items.push(it);}});
   if(!items.length){log('No hay filas completas. Selecciona tipo, grupo, materia y enlace.');$('go').disabled=false;return;}
   log(`Leyendo ${items.length} archivo(s)...`);
-  const res=await Promise.all(items.map(async it=>{try{return{it,parsed:parsear(await leer(it.url),it)}}catch(e){return{it,err:e.message}}}));
+  // Procesamos los reportes uno por uno. En producción, lanzar 10 peticiones
+  // simultáneas al Apps Script puede provocar límites/throttling y dejar al
+  // docente con la sensación de que ninguna fila se envió. Cada fila queda
+  // registrada por separado y un fallo no cancela las demás.
   let total=0;
-  for(const r of res){
+  for(const it of items){
+    let r;
+    try { r={it, parsed:parsear(await leer(it.url),it)}; }
+    catch(e) { r={it, err:e.message}; }
     if(r.err){log(`❌ ${r.it.grupo}: ${r.err}`);continue;}
     const {rows,alumnos}=r.parsed;
     try {
@@ -443,8 +449,16 @@ async function importar(){
         }
       }
       log(`✓ Calificaciones guardadas: ${rows.length}`);
-      for(const a of alumnos){
-        await setDoc(doc(db,'alumnos',a.correo),normalizarGuardado({correo:a.correo,nombre:a.nombre,grupos:arrayUnion(String(a.grupo||'').trim().replace(/\s+/g,' ').toUpperCase()),ultimoDocente:me.email,actualizado:serverTimestamp()}),{merge:true});
+      // Los alumnos también se guardan por lotes para que una carga de muchos
+      // alumnos no haga decenas/centenas de escrituras independientes.
+      for(let i=0;i<alumnos.length;i+=450){
+        const b=writeBatch(db);
+        alumnos.slice(i,i+450).forEach(a=>b.set(
+          doc(db,'alumnos',a.correo),
+          normalizarGuardado({correo:a.correo,nombre:a.nombre,grupos:arrayUnion(String(a.grupo||'').trim().replace(/\s+/g,' ').toUpperCase()),ultimoDocente:me.email,actualizado:serverTimestamp()}),
+          {merge:true}
+        ));
+        await b.commit();
       }
       log(`✓ Alumnos actualizados: ${alumnos.length}`);
       const aid=hash([me.email,r.it.grupo,r.it.materia].join('|'));
