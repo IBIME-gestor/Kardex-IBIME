@@ -1,93 +1,64 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{db}/documents {
-    // ─────────────────────────────────────────────────────────────
-    // Identidad / roles
-    // ─────────────────────────────────────────────────────────────
     function signedIn() {
       return request.auth != null && request.auth.token.email != null;
     }
-
-    // Firebase Auth normaliza el email del token a minúsculas.
     function em() {
       return signedIn() ? request.auth.token.email.lower() : '';
     }
-
     function dom() {
       return signedIn()
         && request.auth.token.email_verified == true
         && em().matches('.*@ibime[.]edu[.]mx');
     }
-
     function isAdminEmail() {
       return dom() && em() == 'josue.jain@ibime.edu.mx';
     }
-
-    function hasTeacherProfile() {
-      return dom()
-        && exists(/databases/$(db)/documents/docentes/$(em()));
+    function hasProfile() {
+      return dom() && exists(/databases/$(db)/documents/docentes/$(em()));
     }
-
-    function isStoredAdmin() {
-      return hasTeacherProfile()
-        && get(/databases/$(db)/documents/docentes/$(em())).data.rol.lower() == 'admin';
+    function profile() {
+      return get(/databases/$(db)/documents/docentes/$(em())).data;
     }
-
     function admin() {
-      return isAdminEmail() || isStoredAdmin();
+      return isAdminEmail() || (hasProfile() && profile().rol.lower() == 'admin');
     }
-
+    function isDirectivo() {
+      return hasProfile() && profile().rol.lower() == 'directivo';
+    }
     function docente() {
-      return hasTeacherProfile()
-        && get(/databases/$(db)/documents/docentes/$(em())).data.rol.lower() in ['docente', 'admin'];
+      return hasProfile() && profile().rol.lower() in ['docente', 'admin'];
     }
-
+    function privilege(p) {
+      return admin() || (isDirectivo() && p in profile().permisos);
+    }
     function ownDocente(id) {
       return dom() && em() == id.lower();
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // Perfiles de docentes
-    // ─────────────────────────────────────────────────────────────
     match /docentes/{id} {
-      // El administrador puede administrar todos los perfiles.
-      allow read, write: if admin();
-
-      // Cada docente puede consultar su propio perfil.
-      allow get: if ownDocente(id);
-
-      // Primer acceso: el docente puede crear únicamente su propio perfil.
-      allow create: if ownDocente(id)
+      allow read: if admin() || (isDirectivo() && (privilege('docentes') || privilege('dashboardGeneral') || privilege('avance'))) || ownDocente(id);
+      allow create: if admin() || (ownDocente(id)
         && request.resource.data.correo == em()
-        && request.resource.data.rol.lower() == 'docente';
-
-      // Un docente puede actualizar su perfil, pero no convertirse en admin.
-      allow update: if ownDocente(id)
+        && request.resource.data.rol.lower() == 'docente');
+      allow update: if admin() || (ownDocente(id)
         && resource.data.rol.lower() == 'docente'
         && request.resource.data.rol.lower() == 'docente'
-        && request.resource.data.correo == em();
-
+        && request.resource.data.correo == em());
       allow delete: if admin();
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // Catálogos: lectura para docentes, escritura para admin
-    // ─────────────────────────────────────────────────────────────
     match /grupos/{id} {
-      allow read: if docente() || admin();
+      allow read: if docente() || privilege('dashboardGeneral') || privilege('docentes') || privilege('grupos') || privilege('avance');
       allow write: if admin();
     }
-
     match /asignaturas/{id} {
-      allow read: if docente() || admin();
+      allow read: if docente() || privilege('dashboardGeneral') || privilege('docentes') || privilege('asignaturas');
       allow write: if admin();
     }
-
-    // ─────────────────────────────────────────────────────────────
-    // Alumnos
-    // ─────────────────────────────────────────────────────────────
     match /alumnos/{id} {
-      allow read: if docente() || admin();
+      allow read: if docente() || privilege('dashboardGeneral') || privilege('docentes') || privilege('alumnos') || privilege('cargas') || privilege('avance');
       allow create, update: if admin() || (
         docente()
         && request.resource.data.correo == id
@@ -95,38 +66,20 @@ service cloud.firestore {
       );
       allow delete: if admin();
     }
-
-    // ─────────────────────────────────────────────────────────────
-    // Asignaciones / avance: cada docente ve y modifica solamente lo suyo
-    // ─────────────────────────────────────────────────────────────
     match /asignaciones/{id} {
-      allow read: if admin() || (docente() && resource.data.docente == em());
+      allow read: if admin() || privilege('dashboardGeneral') || privilege('docentes') || privilege('asignaciones') || privilege('cargas') || privilege('avance') || (docente() && resource.data.docente == em());
       allow create: if admin() || (docente() && request.resource.data.docente == em());
-      allow update: if admin()
-        || (docente()
-            && resource.data.docente == em()
-            && request.resource.data.docente == em());
+      allow update: if admin() || (docente() && resource.data.docente == em() && request.resource.data.docente == em());
       allow delete: if admin() || (docente() && resource.data.docente == em());
     }
-
     match /avance/{id} {
-      allow read: if admin() || (docente() && resource.data.docente == em());
+      allow read: if admin() || privilege('dashboardGeneral') || privilege('docentes') || privilege('avance') || privilege('cargas') || privilege('asignaciones') || (docente() && resource.data.docente == em());
       allow create: if admin() || (docente() && request.resource.data.docente == em());
-      allow update: if admin()
-        || (docente()
-            && resource.data.docente == em()
-            && request.resource.data.docente == em());
+      allow update: if admin() || (docente() && resource.data.docente == em() && request.resource.data.docente == em());
       allow delete: if admin() || (docente() && resource.data.docente == em());
     }
-
-    // ─────────────────────────────────────────────────────────────
-    // Calificaciones
-    // El ID de las nuevas calificaciones incluye al docente para evitar
-    // colisiones entre dos profesores que carguen el mismo grupo/materia.
-    // ─────────────────────────────────────────────────────────────
     match /calificaciones/{id} {
-      allow read: if admin() || (docente() && resource.data.docente == em());
-
+      allow read: if admin() || privilege('dashboardGeneral') || privilege('docentes') || privilege('avance') || privilege('cargas') || privilege('asignaciones') || (docente() && resource.data.docente == em());
       allow create: if admin() || (
         docente()
         && request.resource.data.docente == em()
@@ -134,7 +87,6 @@ service cloud.firestore {
         && request.resource.data.calif >= 0
         && request.resource.data.calif <= 10
       );
-
       allow update: if admin() || (
         docente()
         && resource.data.docente == em()
@@ -143,7 +95,6 @@ service cloud.firestore {
         && request.resource.data.calif >= 0
         && request.resource.data.calif <= 10
       );
-
       allow delete: if admin();
     }
   }
