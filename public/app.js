@@ -167,6 +167,21 @@ async function getCatalog(col, filtro = null) {
   return (await getDocs(q)).docs.map(d => ({ id: d.id, ...d.data() }));
 }
 
+function groupKey(nombre, tipo='') {
+  return `${normalizarCatalogo('grupos', nombre)}|${normalizarCatalogo('grupos', tipo)}`;
+}
+
+function recordDocente(r) { return normEmail(r?.docente || r?.correo || r?.profesor || r?.teacher || ''); }
+function recordGrupo(r) { return String(r?.grupo || r?.grupoNombre || r?.group || '').trim(); }
+function recordMateria(r) { return String(r?.materia || r?.asignatura || r?.subject || '').trim(); }
+function recordTipo(r) { return String(r?.tipo || r?.idioma || '').trim().toUpperCase().replace('INGLÉS','INGLES').replace('ESPAÑOL','ESPAÑOL'); }
+
+function inferTipo(grupo, grupos) {
+  const n = normalizarCatalogo('grupos', grupo);
+  const hit = grupos.find(g => normalizarCatalogo('grupos', g.nombre) === n);
+  return hit ? String(hit.tipo || '').toUpperCase() : '';
+}
+
 async function obtenerDatosGenerales() {
   const [docs, av, asig, cal, alumnos, grupos, mats] = await Promise.all([
     getDocs(collection(db, 'docentes')), getDocs(collection(db, 'avance')), getDocs(collection(db, 'asignaciones')),
@@ -176,58 +191,141 @@ async function obtenerDatosGenerales() {
   const avances = av.docs.map(x => ({id:x.id,...x.data()}));
   const asignaciones = asig.docs.map(x => ({id:x.id,...x.data()}));
   const califs = cal.docs.map(x => ({id:x.id,...x.data()}));
+  const alumnosRows = alumnos.docs.map(x => ({id:x.id,...x.data()}));
   const gruposRows = grupos.docs.map(x => ({id:x.id,...x.data()}));
+  const matsRows = mats.docs.map(x => ({id:x.id,...x.data()}));
+
+  // Una carga real es la combinación DOCENTE + GRUPO + MATERIA.
+  // Primero usamos avance/asignaciones y luego completamos con calificaciones
+  // antiguas, para que los datos ya existentes en producción no desaparezcan.
   const cargasMap = new Map();
+  const califsPorCarga = new Map();
+  const alumnosPorCarga = new Map();
+  for (const c of califs) {
+    const docente = recordDocente(c), grupo = recordGrupo(c), materia = recordMateria(c);
+    if (!docente || !grupo || !materia) continue;
+    const key = `${docente}|${normalizarCatalogo('grupos', grupo)}|${normalizarCatalogo('grupos', materia)}`;
+    califsPorCarga.set(key, (califsPorCarga.get(key) || 0) + 1);
+    const correo = normEmail(c.correo || '');
+    if (correo) {
+      if (!alumnosPorCarga.has(key)) alumnosPorCarga.set(key, new Set());
+      alumnosPorCarga.get(key).add(correo);
+    }
+  }
+
   const addCarga = (r, source) => {
-    const docente = normEmail(r.docente || '');
-    const grupo = String(r.grupo || '').trim();
-    const materia = String(r.asignatura || r.materia || '').trim();
-    if (!docente && !grupo && !materia) return;
-    const key = `${docente}|${grupo}|${materia}`;
-    const old = cargasMap.get(key) || {docente,grupo,materia,filas:0,alumnos:0,estado:'CARGADO',url:'',sources:new Set()};
+    const docente = recordDocente(r), grupo = recordGrupo(r), materia = recordMateria(r);
+    if (!docente || !grupo || !materia) return;
+    const key = `${docente}|${normalizarCatalogo('grupos', grupo)}|${normalizarCatalogo('grupos', materia)}`;
+    const old = cargasMap.get(key) || {
+      id: r.id || '', docente, grupo, materia,
+      tipo: recordTipo(r) || inferTipo(grupo, gruposRows),
+      filas: 0, alumnos: 0, estado: 'CARGADO', url: '', fecha: '',
+      sources: new Set()
+    };
     old.sources.add(source);
-    old.filas = Math.max(old.filas, Number(r.filas)||0);
-    old.alumnos = Math.max(old.alumnos, Number(r.alumnos)||0);
-    old.url = old.url || r.url || '';
+    old.tipo = old.tipo || recordTipo(r) || inferTipo(grupo, gruposRows);
+    old.filas = Math.max(old.filas, Number(r.filas) || 0);
+    old.alumnos = Math.max(old.alumnos, Number(r.alumnos) || 0);
+    old.url = old.url || String(r.url || '');
+    old.fecha = old.fecha || r.fecha || r.actualizado || '';
     if (r.estado) old.estado = r.estado;
     cargasMap.set(key, old);
   };
-  avances.forEach(x=>addCarga(x,'avance'));
-  asignaciones.forEach(x=>addCarga(x,'asignacion'));
-  // Compatibilidad con calificaciones antiguas: si no existe avance/asignación, también cuentan como carga.
-  const legacyCounts = new Map();
-  califs.forEach(x=>{
-    const docente=normEmail(x.docente||''); const grupo=String(x.grupo||'').trim(); const materia=String(x.asignatura||x.materia||'').trim();
-    if(!docente||!grupo||!materia)return;
-    const key=`${docente}|${grupo}|${materia}`; legacyCounts.set(key,(legacyCounts.get(key)||0)+1); addCarga(x,'calificacion');
-  });
-  for (const [key,n] of legacyCounts) { const c=cargasMap.get(key); if(c) c.filas=Math.max(c.filas,n); }
-  return {docentes,avances,asignaciones,califs,alumnos:alumnos.docs.map(x=>x.data()),grupos:gruposRows,mats:mats.docs.map(x=>x.data()),cargas:[...cargasMap.values()]};
+
+  avances.forEach(x => addCarga(x, 'avance'));
+  asignaciones.forEach(x => addCarga(x, 'asignacion'));
+  califs.forEach(x => addCarga(x, 'calificacion'));
+
+  for (const [key, carga] of cargasMap) {
+    carga.filas = Math.max(carga.filas, califsPorCarga.get(key) || 0);
+    carga.alumnos = Math.max(carga.alumnos, alumnosPorCarga.get(key)?.size || 0);
+  }
+
+  // Asignaciones visibles: si la colección asignaciones está vacía o incompleta,
+  // se reconstruye visualmente desde avance/calificaciones sin modificar Firebase.
+  const asignacionesMap = new Map();
+  for (const a of asignaciones) {
+    const docente=recordDocente(a), grupo=recordGrupo(a), materia=recordMateria(a);
+    if (!docente || !grupo || !materia) continue;
+    const key=`${docente}|${normalizarCatalogo('grupos',grupo)}|${normalizarCatalogo('grupos',materia)}`;
+    asignacionesMap.set(key, {...a, docente, grupo, materia, tipo:recordTipo(a)||inferTipo(grupo,gruposRows)});
+  }
+  for (const c of cargasMap.values()) {
+    const key=`${c.docente}|${normalizarCatalogo('grupos',c.grupo)}|${normalizarCatalogo('grupos',c.materia)}`;
+    const prev=asignacionesMap.get(key) || {};
+    asignacionesMap.set(key, {
+      ...prev, docente:c.docente, grupo:c.grupo, materia:c.materia,
+      tipo:prev.tipo || c.tipo || inferTipo(c.grupo,gruposRows),
+      url:prev.url || c.url || '', estado:prev.estado || c.estado || 'CARGADO',
+      filas:c.filas, alumnos:c.alumnos, fecha:prev.fecha || c.fecha || '',
+      fuente:prev.id ? 'asignacion' : 'carga detectada'
+    });
+  }
+
+  return {
+    docentes, avances, asignaciones, califs, alumnos:alumnosRows, grupos:gruposRows, mats:matsRows,
+    cargas:[...cargasMap.values()],
+    asignacionesVisibles:[...asignacionesMap.values()]
+  };
+}
+
+function cargaTieneGrupo(c, g) {
+  const gt = String(g.tipo || '').toUpperCase();
+  const ct = String(c.tipo || '').toUpperCase();
+  return normalizarCatalogo('grupos', c.grupo) === normalizarCatalogo('grupos', g.nombre)
+    && (!gt || !ct || gt === ct);
 }
 
 async function vistaDashboard() {
   if (me.rol === 'admin' || me.rol === 'directivo') {
     const d = await obtenerDatosGenerales();
     const cargas = d.cargas;
-    const gruposConCarga = new Set(cargas.map(x=>String(x.grupo||'').toUpperCase()).filter(Boolean));
-    const totalGrupos = d.grupos.length, sinCarga = d.grupos.filter(g=>!gruposConCarga.has(String(g.nombre||'').toUpperCase()));
-    main.innerHTML = `<h2>${me.rol === 'admin' ? 'Dashboard del administrador' : 'Dashboard general'}</h2>
-      <div class="cards"><div><b>${d.docentes.length}</b><span>Docentes</span></div><div><b>${totalGrupos}</b><span>Grupos</span></div><div><b>${d.mats.length}</b><span>Asignaturas</span></div><div><b>${d.alumnos.length}</b><span>Alumnos</span></div><div><b>${cargas.length}</b><span>Cargas detectadas</span></div><div><b>${d.califs.length}</b><span>Calificaciones</span></div></div>
-      <div class="dashboard-grid"><section><h3>Estado de grupos</h3><table><tr><th>Grupo</th><th>Tipo</th><th>Estado</th><th>Cargas</th></tr>${d.grupos.map(g=>{const n=String(g.nombre||'').toUpperCase(), cs=cargas.filter(c=>String(c.grupo||'').toUpperCase()===n);return `<tr><td>${esc(g.nombre)}</td><td>${esc(g.tipo||'')}</td><td><span class="status ${cs.length?'ok':'pending'}">${cs.length?'CARGADO':'PENDIENTE'}</span></td><td>${cs.length}</td></tr>`}).join('')}</table>${sinCarga.length?`<p class="muted">Grupos pendientes: ${esc(sinCarga.map(g=>g.nombre).join(', '))}</p>`:''}</section>
-      <section><h3>Docentes y sus cargas</h3><table><tr><th>Docente</th><th>Foto</th><th>Cargas</th><th>Registros</th></tr>${d.docentes.map(t=>{const mine=cargas.filter(c=>normEmail(c.docente)===normEmail(t.correo));return `<tr><td>${esc(t.nombre||t.correo)}</td><td>${t.foto?`<img class="avatar-sm" src="${esc(t.foto)}" alt="Foto">`:'—'}</td><td>${mine.length}</td><td>${mine.reduce((s,c)=>s+(Number(c.filas)||0),0)}</td></tr>`}).join('')}</table></section></div>`;
+    const gruposCargados = d.grupos.filter(g => cargas.some(c => cargaTieneGrupo(c, g)));
+    const pendientes = d.grupos.filter(g => !cargas.some(c => cargaTieneGrupo(c, g)));
+    const registros = cargas.reduce((s,c)=>s+(Number(c.filas)||0),0);
+    const alumnosDetectados = new Set();
+    d.califs.forEach(c => { const e=normEmail(c.correo||''); if(e) alumnosDetectados.add(e); });
+    d.alumnos.forEach(a => { const e=normEmail(a.correo||''); if(e) alumnosDetectados.add(e); });
+
+    const estadoGrupos = d.grupos.map(g => {
+      const rows=cargas.filter(c=>cargaTieneGrupo(c,g));
+      const docentes=[...new Set(rows.map(c=>c.docente).filter(Boolean))];
+      const materias=[...new Set(rows.map(c=>c.materia).filter(Boolean))];
+      const regs=rows.reduce((s,c)=>s+(Number(c.filas)||0),0);
+      return `<tr><td><strong>${esc(g.nombre||'')}</strong></td><td>${esc(g.tipo||'')}</td><td><span class="status ${rows.length?'ok':'pending'}">${rows.length?'CARGADO':'PENDIENTE'}</span></td><td>${rows.length}</td><td>${esc(docentes.map(e=>d.docentes.find(x=>normEmail(x.correo)===normEmail(e))?.nombre||e).join(', ')||'—')}</td><td>${esc(materias.join(', ')||'—')}</td><td>${regs}</td></tr>`;
+    }).join('');
+
+    const docenteRows=d.docentes.map(t=>{
+      const mine=cargas.filter(c=>normEmail(c.docente)===normEmail(t.correo));
+      const detalle=mine.map(c=>`${c.grupo} · ${c.materia} (${Number(c.filas)||0})`).join(' | ');
+      return `<tr><td>${t.foto?`<img class="avatar-sm" src="${esc(t.foto)}" alt="Foto">`:'<div class="avatar-placeholder">—</div>'}</td><td><strong>${esc(t.nombre||t.correo)}</strong><small class="cell-sub">${esc(t.correo||'')}</small></td><td>${mine.length}</td><td>${mine.reduce((s,c)=>s+(Number(c.filas)||0),0)}</td><td>${esc(detalle||'Sin cargas registradas')}</td></tr>`;
+    }).join('');
+
+    const cargaRows=cargas.map(c=>`<tr><td>${esc(d.docentes.find(x=>normEmail(x.correo)===normEmail(c.docente))?.nombre||c.docente)}</td><td>${esc(c.grupo)}</td><td>${esc(c.tipo||'')}</td><td>${esc(c.materia)}</td><td>${Number(c.alumnos)||0}</td><td><strong>${Number(c.filas)||0}</strong></td><td><span class="status ${String(c.estado||'CARGADO').toUpperCase()==='CARGADO'?'ok':'pending'}">${esc(c.estado||'CARGADO')}</span></td><td>${esc([...c.sources].join(', '))}</td></tr>`).join('');
+
+    main.innerHTML=`<div class="section-head"><div><h2>${me.rol === 'admin' ? 'Dashboard del administrador' : 'Dashboard general'}</h2><p>Resumen real de grupos, docentes, cargas y registros encontrados en Firebase.</p></div></div>
+      <div class="cards dashboard-cards"><div><b>${d.docentes.length}</b><span>Docentes</span></div><div><b>${d.grupos.length}</b><span>Grupos</span></div><div><b>${gruposCargados.length}</b><span>Grupos con carga</span></div><div><b>${cargas.length}</b><span>Cargas docente · grupo · materia</span></div><div><b>${registros}</b><span>Registros importados</span></div><div><b>${alumnosDetectados.size}</b><span>Alumnos detectados</span></div><div><b>${d.califs.length}</b><span>Calificaciones</span></div><div><b>${d.mats.length}</b><span>Asignaturas</span></div></div>
+      <section class="dashboard-section"><div class="section-title"><div><h3>Estado de grupos</h3><p>Cada grupo se marca como cargado solo cuando existe una carga del mismo grupo y tipo.</p></div><span class="section-count">${gruposCargados.length} / ${d.grupos.length}</span></div><div class="table-wrap"><table><thead><tr><th>Grupo</th><th>Tipo</th><th>Estado</th><th>Cargas</th><th>Docente(s)</th><th>Materia(s)</th><th>Registros</th></tr></thead><tbody>${estadoGrupos||'<tr><td colspan="7" class="empty">No hay grupos registrados.</td></tr>'}</tbody></table></div>${pendientes.length?`<p class="muted"><strong>Pendientes:</strong> ${esc(pendientes.map(g=>`${g.nombre} (${g.tipo||'sin tipo'})`).join(', '))}</p>`:''}</section>
+      <section class="dashboard-section"><div class="section-title"><div><h3>Docentes y sus cargas</h3><p>Se muestra qué grupo y materia cargó cada docente y cuántos registros produjo.</p></div></div><div class="table-wrap"><table><thead><tr><th>Foto</th><th>Docente</th><th>Cargas</th><th>Registros</th><th>Detalle de cargas</th></tr></thead><tbody>${docenteRows||'<tr><td colspan="5" class="empty">No hay docentes.</td></tr>'}</tbody></table></div></section>
+      <section class="dashboard-section"><div class="section-title"><div><h3>Detalle de cargas detectadas</h3><p>Esta es la fuente que alimenta los números del dashboard. No se cuentan grupos duplicados como cargas independientes.</p></div><span class="section-count">${cargas.length}</span></div><div class="table-wrap"><table><thead><tr><th>Docente</th><th>Grupo</th><th>Tipo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Origen</th></tr></thead><tbody>${cargaRows||'<tr><td colspan="8" class="empty">No hay cargas registradas.</td></tr>'}</tbody></table></div></section>`;
     return;
   }
-  const [av, asig, cal] = await Promise.all([
-    getCatalog('avance',['docente','==',me.email]),
-    getCatalog('asignaciones',['docente','==',me.email]),
-    getCatalog('calificaciones',['docente','==',me.email])
+
+  const [av, asig, cal, grupos] = await Promise.all([
+    getCatalog('avance',['docente','==',me.email]), getCatalog('asignaciones',['docente','==',me.email]),
+    getCatalog('calificaciones',['docente','==',me.email]), getCatalog('grupos')
   ]);
   const map=new Map();
-  [...av,...asig].forEach(a=>{const key=`${a.grupo||''}|${a.asignatura||a.materia||''}`;map.set(key,{...map.get(key),...a});});
-  cal.forEach(c=>{const key=`${c.grupo||''}|${c.asignatura||c.materia||''}`;const x=map.get(key)||{grupo:c.grupo,asignatura:c.asignatura||c.materia};x.filas=Math.max(Number(x.filas)||0,1);x._cal=(x._cal||0)+1;map.set(key,x);});
+  const add=(a)=>{const grupo=recordGrupo(a), materia=recordMateria(a);if(!grupo||!materia)return;const key=`${normalizarCatalogo('grupos',grupo)}|${normalizarCatalogo('grupos',materia)}`;map.set(key,{...map.get(key),...a,grupo,materia,tipo:recordTipo(a)||inferTipo(grupo,grupos)});};
+  [...av,...asig].forEach(add);
+  const counts=new Map(); const alumnosMap=new Map();
+  cal.forEach(c=>{const grupo=recordGrupo(c),materia=recordMateria(c);if(!grupo||!materia)return;const key=`${normalizarCatalogo('grupos',grupo)}|${normalizarCatalogo('grupos',materia)}`;counts.set(key,(counts.get(key)||0)+1);if(c.correo){if(!alumnosMap.has(key))alumnosMap.set(key,new Set());alumnosMap.get(key).add(normEmail(c.correo));}add(c);});
+  for(const [key,n] of counts){const x=map.get(key);if(x)x.filas=Math.max(Number(x.filas)||0,n);}
+  for(const [key,set] of alumnosMap){const x=map.get(key);if(x)x.alumnos=Math.max(Number(x.alumnos)||0,set.size);}
   const ds=[...map.values()];
-  const total=ds.reduce((s,a)=>s+(Number(a.filas)||0),0), alumnos=ds.reduce((s,a)=>s+(Number(a.alumnos)||0),0);
-  main.innerHTML=`<div class="perfil">${me.foto?`<img src="${esc(me.foto)}" alt="Foto">`:''}<div><h2>Hola, ${esc(me.nombre)}</h2><p>${esc(me.email)} · ${esc(me.rol)}</p></div></div><div class="cards"><div><b>${ds.length}</b><span>Cargas realizadas</span></div><div><b>${alumnos}</b><span>Alumnos detectados</span></div><div><b>${total}</b><span>Registros importados</span></div><div><b>${cal.length}</b><span>Calificaciones</span></div></div><div class="acciones"><button class="p" id="nueva">+ Cargar nuevo reporte</button></div><h3>Grupos y materias cargados</h3>${ds.length?`<table><tr><th>Grupo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Fecha</th></tr>${ds.map(a=>`<tr><td>${esc(a.grupo)}</td><td>${esc(a.asignatura||a.materia)}</td><td>${Number(a.alumnos)||0}</td><td>${Number(a.filas)||0}</td><td>${esc(a.estado||'CARGADO')}</td><td>${fecha(a.fecha||a.actualizado)}</td></tr>`).join('')}</table>`:'<div class="empty">Todavía no hay cargas asociadas a tu cuenta.</div>'}`;
+  const total=ds.reduce((s,a)=>s+(Number(a.filas)||0),0), alumnos=[...new Set(ds.flatMap(a=>[...((alumnosMap.get(`${normalizarCatalogo('grupos',a.grupo)}|${normalizarCatalogo('grupos',a.materia)}`)||new Set())]) ))].length;
+  main.innerHTML=`<div class="perfil">${me.foto?`<img src="${esc(me.foto)}" alt="Foto">`:''}<div><h2>Hola, ${esc(me.nombre)}</h2><p>${esc(me.email)} · ${esc(me.rol)}</p></div></div><div class="cards"><div><b>${ds.length}</b><span>Cargas realizadas</span></div><div><b>${alumnos}</b><span>Alumnos detectados</span></div><div><b>${total}</b><span>Registros importados</span></div><div><b>${cal.length}</b><span>Calificaciones</span></div></div><div class="acciones"><button class="p" id="nueva">+ Cargar nuevo reporte</button></div><section class="dashboard-section"><div class="section-title"><div><h3>Mis grupos cargados</h3><p>Aquí ves exactamente qué grupo cargaste, de qué tipo es, la materia y cuántos registros produjo.</p></div></div>${ds.length?`<div class="table-wrap"><table><thead><tr><th>Grupo</th><th>Tipo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Fecha</th></tr></thead><tbody>${ds.map(a=>`<tr><td><strong>${esc(a.grupo)}</strong></td><td>${esc(a.tipo||'')}</td><td>${esc(a.materia)}</td><td>${Number(a.alumnos)||0}</td><td><strong>${Number(a.filas)||0}</strong></td><td><span class="status ${String(a.estado||'CARGADO').toUpperCase()==='CARGADO'?'ok':'pending'}">${esc(a.estado||'CARGADO')}</span></td><td>${fecha(a.fecha||a.actualizado)}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">Todavía no hay cargas asociadas a tu cuenta.</div>'}</section>`;
   $('nueva').onclick=()=>ir('importar');
 }
 
@@ -526,39 +624,54 @@ function renderBulkEditor(k, rows, existing) {
   };
 }
 
-async function vistaTab(k){
+async function vistaTab(k) {
   if (k === 'docentes') return vistaDocentesPanel();
-  const t=TABS[k]; let q=collection(db,t.col); if(t.w && !['gruposES','gruposEN'].includes(k))q=query(q,where(...t.w)); const ds=(await getDocs(q)).docs;
+  const t=TABS[k];
+  let q=collection(db,t.col);
+  if(t.w && !['gruposES','gruposEN'].includes(k)) q=query(q,where(...t.w));
+  const ds=(await getDocs(q)).docs;
   let rows=ds.map(d=>({id:d.id,...d.data()}));
   if(k==='gruposES') rows=rows.filter(r=>String(r.tipo||'').toUpperCase()==='ESPAÑOL');
   if(k==='gruposEN') rows=rows.filter(r=>String(r.tipo||'').toUpperCase()==='INGLES');
-  const bulk = esCargaMasiva(k);
-  const alumnoBulk = k === 'alumnos';
+  const bulk=esCargaMasiva(k), alumnoBulk=k==='alumnos';
   main.innerHTML=`<div class="section-head"><div><h2>${t.n}</h2><p>${bulk ? (alumnoBulk ? 'Carga tu Excel o descarga la plantilla oficial. Revisa todos los alumnos antes de guardarlos.' : 'Agrega una por una o pega directamente varias filas copiadas de Google Sheets. Revisa todo antes de guardar.') : 'Agrega, edita y completa la información. Los cambios se guardan en Firestore.'}</p></div><div class="actions"><button class="p" id="nuevo">+ Nuevo</button>${alumnoBulk ? '<button id="plantillaAlumnos">DESCARGAR PLANTILLA EXCEL</button><label class="button-file" for="excelAlumnos">SUBIR EXCEL</label><input id="excelAlumnos" type="file" accept=".xlsx,.xls" hidden>' : bulk ? '<button id="pegarMasivo">Pegar desde Sheets</button>' : ''}</div></div>
     ${bulk ? `<div id="bulkPaste" class="bulk-paste" hidden><label>${alumnoBulk ? 'También puedes pegar las 6 columnas desde Excel/Sheets' : 'Pega aquí las filas copiadas de Google Sheets'}<textarea id="pasteArea" rows="7" placeholder="${alumnoBulk ? 'MATRICULA<TAB>NOMBRE<TAB>CORREO<TAB>GRUPO ESPAÑOL<TAB>GRUPO INGLES<TAB>TUTOR' : k === 'asignaturas' ? 'Materia<TAB>Tipo\nMATEMÁTICAS<TAB>ESPAÑOL\nENGLISH<TAB>INGLES' : 'Grupo\n1A\n1B\n2A'}"></textarea></label><div class="actions"><button id="procesarPegado" class="p">PREVISUALIZAR FILAS</button><button id="cancelarPegado">Cancelar</button></div></div><div id="bulkEditor" class="editor" hidden></div>` : '<div id="editor" class="editor" hidden></div>'}
     <div class="tools"><input id="buscar" placeholder="Buscar..."><button id="recargar">Actualizar</button></div>
-    <div class="table-wrap"><table><tr>${t.f.map(f=>`<th>${f}</th>`).join('')}<th>Acciones</th></tr>${rows.map(r=>`<tr>${t.f.map(f=>`<td>${esc(Array.isArray(r[f])?r[f].join(', '):r[f])}</td>`).join('')}<td class="actions"><button data-edit="${esc(r.id)}">Editar</button><button class="danger" data-del="${esc(r.id)}">Borrar</button></td></tr>`).join('')}</table></div>`;
+    <div class="table-wrap"><table><thead><tr>${t.f.map(f=>`<th>${f}</th>`).join('')}<th>Acciones</th></tr></thead><tbody>${rows.map(r=>`<tr>${t.f.map(f=>`<td>${esc(Array.isArray(r[f])?r[f].join(', '):r[f])}</td>`).join('')}<td class="actions"><button data-edit="${esc(r.id)}">Editar</button><button class="danger" data-del="${esc(r.id)}">Borrar</button></td></tr>`).join('')||'<tr><td colspan="20" class="empty">No hay registros.</td></tr>'}</tbody></table></div>`;
+
   const editor=$('editor');
-  const openEditor=(data={})=>{editor.hidden=false;editor.innerHTML=`<h3>${data.id?'Editar':'Nueva'} ${t.n}</h3><div class="form-grid">${formFields(t,data)}</div><div class="actions"><button class="p" id="guardarForm">Guardar</button><button id="cancelarForm">Cancelar</button></div>`;
-    $('cancelarForm').onclick=()=>{editor.hidden=true}; $('guardarForm').onclick=async()=>{const o={_id:data.id||''};t.f.forEach(f=>{let v=$('n_'+f)?.value.trim()||'';if(f==='correo'||f==='docente')v=normEmail(v);if(f==='grupos')v=v.split(',').map(x=>x.trim()).filter(Boolean);o[f]=v;});if(t.fix)Object.assign(o,t.fix);if(k==='docentes'&&o.correo===ADMIN_EMAIL.toLowerCase())o.rol='admin';if(!o[t.key||t.f[0]]&&!t.key)return alert('Completa los campos obligatorios.');await guardar(t,[o]);editor.hidden=true;vistaTab(k);};
+  const openEditor=(data={})=>{
+    if (!editor) return;
+    editor.hidden=false;
+    editor.innerHTML=`<h3>${data.id?'Editar':'Nueva'} ${t.n}</h3><div class="form-grid">${formFields(t,data)}</div><div class="actions"><button class="p" id="guardarForm">Guardar</button><button id="cancelarForm">Cancelar</button></div>`;
+    $('cancelarForm').onclick=()=>{editor.hidden=true};
+    $('guardarForm').onclick=async()=>{const o={_id:data.id||''};t.f.forEach(f=>{let v=$('n_'+f)?.value.trim()||'';if(f==='correo'||f==='docente')v=normEmail(v);if(f==='grupos')v=v.split(',').map(x=>x.trim()).filter(Boolean);o[f]=v;});if(t.fix)Object.assign(o,t.fix);if(k==='docentes'&&o.correo===ADMIN_EMAIL.toLowerCase())o.rol='admin';if(!o[t.key||t.f[0]]&&!t.key)return alert('Completa los campos obligatorios.');try{await guardar(t,[o]);editor.hidden=true;vistaTab(k);}catch(e){alert('No se pudo guardar: '+e.message);}};
   };
-  $('nuevo').onclick=()=>openEditor();
+
+  $('nuevo').onclick=()=>{
+    if (bulk) {
+      const blank=alumnoBulk ? {matricula:'',nombre:'',correo:'',grupoEspanol:'',grupoIngles:'',tutor:''} : {nombre:'' , ...(k==='asignaturas'?{tipo:'ESPAÑOL'}:{})};
+      renderBulkEditor(k,[blank],rows);
+      const bp=$('bulkPaste'); if(bp) bp.hidden=true;
+      return;
+    }
+    openEditor();
+  };
   if(bulk){
     if(alumnoBulk){
       $('plantillaAlumnos').onclick=descargarPlantillaAlumnos;
-      $('excelAlumnos').onchange=async e=>{const file=e.target.files?.[0];if(!file)return;try{const parsed=await leerExcelAlumnos(file);if(!parsed.length)return alert('No encontré filas válidas. Verifica que el Excel tenga las columnas: MATRICULA, NOMBRE, CORREO, GRUPO ESPAÑOL, GRUPO INGLES y TUTOR.');renderBulkEditor(k,parsed,rows);}catch(err){alert('No se pudo leer el Excel: '+err.message);}e.target.value='';};
-      $('bulkPaste').hidden=false;
+      $('excelAlumnos').onchange=async e=>{const file=e.target.files?.[0];if(!file)return;try{const parsed=await leerExcelAlumnos(file);if(!parsed.length)return alert('No encontré filas válidas.');renderBulkEditor(k,parsed,rows);}catch(err){alert('No se pudo leer el Excel: '+err.message);}e.target.value='';};
     } else {
-      $('pegarMasivo').onclick=()=>{$('bulkPaste').hidden=!$('bulkPaste').hidden;if(!$('bulkPaste').hidden){$('pasteArea').focus();}};
+      $('pegarMasivo').onclick=()=>{$('bulkPaste').hidden=!$('bulkPaste').hidden;if(!$('bulkPaste').hidden)$('pasteArea').focus();};
     }
     $('cancelarPegado').onclick=()=>{$('bulkPaste').hidden=true;$('pasteArea').value='';};
     $('procesarPegado').onclick=()=>{const parsed=parsearPegado(k,$('pasteArea').value);if(!parsed.length)return alert('No encontré filas válidas.');renderBulkEditor(k,parsed,rows);};
     $('pasteArea').addEventListener('paste',()=>setTimeout(()=>{const parsed=parsearPegado(k,$('pasteArea').value);if(parsed.length)renderBulkEditor(k,parsed,rows);},50));
   }
   main.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openEditor(rows.find(r=>r.id===b.dataset.edit)));
-  main.querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{if(!confirm('¿Borrar este registro?'))return;await deleteDoc(doc(db,t.col,b.dataset.del));vistaTab(k);});
+  main.querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{if(!confirm('¿Borrar este registro?'))return;try{await deleteDoc(doc(db,t.col,b.dataset.del));vistaTab(k);}catch(e){alert('No se pudo borrar: '+e.message);}});
   $('recargar').onclick=()=>vistaTab(k);
-  $('buscar').oninput=e=>{const term=e.target.value.toLowerCase();main.querySelectorAll('table tr').forEach((tr,i)=>{if(i===0)return;tr.hidden=!tr.textContent.toLowerCase().includes(term);});};
+  $('buscar').oninput=e=>{const term=e.target.value.toLowerCase();main.querySelectorAll('tbody tr').forEach(tr=>{tr.hidden=!tr.textContent.toLowerCase().includes(term);});};
 }
 
 async function vistaDocentesPanel(){
@@ -593,30 +706,29 @@ async function editarDocente(correo){
 async function vistaCargasPanel(filtroDocente=''){
   const d=await obtenerDatosGenerales();
   const rows=filtroDocente?d.cargas.filter(c=>normEmail(c.docente)===normEmail(filtroDocente)):d.cargas;
-  main.innerHTML=`<div class="section-head"><div><h2>Cargas y registros</h2><p>Detalle de cada grupo/materia cargado y cuántos registros produjo.</p></div><button id="backDash">Dashboard</button></div><div class="tools"><input id="buscarCarga" placeholder="Buscar docente, grupo o materia..."><button id="refCargas">Actualizar</button></div><div class="table-wrap"><table><tr><th>Docente</th><th>Grupo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Origen</th></tr>${rows.map(r=>`<tr><td>${esc(r.docente)}</td><td>${esc(r.grupo)}</td><td>${esc(r.materia)}</td><td>${Number(r.alumnos)||0}</td><td>${Number(r.filas)||0}</td><td><span class="status ${String(r.estado).toUpperCase()==='CARGADO'?'ok':'pending'}">${esc(r.estado||'CARGADO')}</span></td><td>${esc([...r.sources].join(', '))}</td></tr>`).join('')||'<tr><td colspan="7" class="empty">No hay cargas registradas.</td></tr>'}</table></div>`;
-  $('backDash').onclick=()=>ir('dashboard'); $('refCargas').onclick=()=>vistaCargasPanel(filtroDocente); $('buscarCarga').oninput=e=>{const term=e.target.value.toLowerCase();main.querySelectorAll('table tr').forEach((tr,i)=>{if(i)tr.hidden=!tr.textContent.toLowerCase().includes(term)})};
+  main.innerHTML=`<div class="section-head"><div><h2>Cargas y registros</h2><p>Una fila representa una combinación de docente + grupo + materia. Los registros provienen de avance y, si falta, de las calificaciones existentes.</p></div><button id="backDash">Dashboard</button></div><div class="tools"><input id="buscarCarga" placeholder="Buscar docente, grupo o materia..."><button id="refCargas">Actualizar</button></div><div class="table-wrap"><table><thead><tr><th>Docente</th><th>Grupo</th><th>Tipo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Origen</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(d.docentes.find(x=>normEmail(x.correo)===normEmail(r.docente))?.nombre||r.docente)}</td><td>${esc(r.grupo)}</td><td>${esc(r.tipo||'')}</td><td>${esc(r.materia)}</td><td>${Number(r.alumnos)||0}</td><td><strong>${Number(r.filas)||0}</strong></td><td><span class="status ${String(r.estado||'CARGADO').toUpperCase()==='CARGADO'?'ok':'pending'}">${esc(r.estado||'CARGADO')}</span></td><td>${esc([...r.sources].join(', '))}</td></tr>`).join('')||'<tr><td colspan="8" class="empty">No hay cargas registradas.</td></tr>'}</tbody></table></div>`;
+  $('backDash').onclick=()=>ir('dashboard'); $('refCargas').onclick=()=>vistaCargasPanel(filtroDocente); $('buscarCarga').oninput=e=>{const term=e.target.value.toLowerCase();main.querySelectorAll('tbody tr').forEach(tr=>tr.hidden=!tr.textContent.toLowerCase().includes(term));};
 }
 
 async function vistaAsignacionesGeneral(){
-  const [asig,av]=await Promise.all([getDocs(collection(db,'asignaciones')),getDocs(collection(db,'avance'))]);
-  const map=new Map();
-  asig.docs.forEach(d=>map.set(d.id,{id:d.id,...d.data()}));
-  av.docs.forEach(d=>{const x={id:d.id,...d.data()};const old=map.get(x.id)||{};map.set(x.id,{...old,...x,asignatura:x.asignatura||old.materia,materia:x.materia||old.materia})});
-  const rows=[...map.values()];
-  main.innerHTML=`<h2>Asignaciones</h2><p>Grupo, materia, docente y enlace de cada carga registrada.</p><div class="table-wrap"><table><tr><th>Docente</th><th>Grupo</th><th>Materia</th><th>Tipo</th><th>Estado</th><th>Enlace</th></tr>${rows.map(r=>`<tr><td>${esc(r.docente||'')}</td><td>${esc(r.grupo||'')}</td><td>${esc(r.materia||r.asignatura||'')}</td><td>${esc(r.tipo||'')}</td><td>${esc(r.estado||'CARGADO')}</td><td>${r.url?`<a href="${esc(r.url)}" target="_blank" rel="noopener">Abrir reporte</a>`:'—'}</td></tr>`).join('')||'<tr><td colspan="6" class="empty">No hay asignaciones registradas.</td></tr>'}</table></div>`;
+  const d=await obtenerDatosGenerales();
+  const rows=d.asignacionesVisibles.sort((a,b)=>`${a.docente}|${a.grupo}|${a.materia}`.localeCompare(`${b.docente}|${b.grupo}|${b.materia}`));
+  main.innerHTML=`<div class="section-head"><div><h2>Asignaciones</h2><p>Relación real entre docente, grupo, materia y reporte. Si una carga antigua no tiene documento en <code>asignaciones</code>, se muestra desde sus registros para no perder información.</p></div><button id="refAsig">Actualizar</button></div><div class="table-wrap"><table><thead><tr><th>Docente</th><th>Grupo</th><th>Tipo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Reporte</th><th>Origen</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(d.docentes.find(x=>normEmail(x.correo)===normEmail(r.docente))?.nombre||r.docente||'')}</td><td>${esc(r.grupo||'')}</td><td>${esc(r.tipo||'')}</td><td>${esc(r.materia||r.asignatura||'')}</td><td>${Number(r.alumnos)||0}</td><td>${Number(r.filas)||0}</td><td><span class="status ${String(r.estado||'CARGADO').toUpperCase()==='CARGADO'?'ok':'pending'}">${esc(r.estado||'CARGADO')}</span></td><td>${r.url?`<a href="${esc(r.url)}" target="_blank" rel="noopener">Abrir reporte</a>`:'Sin enlace guardado'}</td><td>${esc(r.fuente||'asignacion')}</td></tr>`).join('')||'<tr><td colspan="9" class="empty">No hay cargas ni asignaciones registradas.</td></tr>'}</tbody></table></div>`;
+  $('refAsig').onclick=()=>vistaAsignacionesGeneral();
 }
 
 async function vistaAvanceGeneral(){
   const d=await obtenerDatosGenerales();
-  main.innerHTML=`<h2>Avance general</h2><p>Estado de grupos y avance por docente.</p><div class="table-wrap"><table><tr><th>Docente</th><th>Grupo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Fecha</th></tr>${d.cargas.map(r=>`<tr><td>${esc(r.docente)}</td><td>${esc(r.grupo)}</td><td>${esc(r.materia)}</td><td>${Number(r.alumnos)||0}</td><td>${Number(r.filas)||0}</td><td>${esc(r.estado||'CARGADO')}</td><td>${fecha(r.fecha)}</td></tr>`).join('')||'<tr><td colspan="7" class="empty">No hay avance registrado.</td></tr>'}</table></div>`;
+  main.innerHTML=`<div class="section-head"><div><h2>Avance general</h2><p>Estado y resultados de cada carga por docente, grupo y materia.</p></div></div><div class="table-wrap"><table><thead><tr><th>Docente</th><th>Grupo</th><th>Tipo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Fecha</th></tr></thead><tbody>${d.cargas.map(r=>`<tr><td>${esc(d.docentes.find(x=>normEmail(x.correo)===normEmail(r.docente))?.nombre||r.docente)}</td><td>${esc(r.grupo)}</td><td>${esc(r.tipo||'')}</td><td>${esc(r.materia)}</td><td>${Number(r.alumnos)||0}</td><td>${Number(r.filas)||0}</td><td>${esc(r.estado||'CARGADO')}</td><td>${fecha(r.fecha)}</td></tr>`).join('')||'<tr><td colspan="8" class="empty">No hay avance registrado.</td></tr>'}</tbody></table></div>`;
 }
-
 
 async function vistaMisAsignaciones(){
-  const rows=await getCatalog('asignaciones',['docente','==',me.email]);
-  main.innerHTML=`<h2>Mis asignaciones</h2><p>Estas son las combinaciones de grupo y materia que tienes registradas.</p>${rows.length?`<table><tr><th>Grupo</th><th>Materia</th><th>Tipo</th><th>Enlace</th></tr>${rows.map(r=>`<tr><td>${esc(r.grupo)}</td><td>${esc(r.materia)}</td><td>${esc(r.tipo)}</td><td><a href="${esc(r.url)}" target="_blank" rel="noopener">Abrir</a></td></tr>`).join('')}</table>`:'<div class="empty">Aún no tienes asignaciones.</div>'}`;
+  const d=await obtenerDatosGenerales();
+  const rows=d.asignacionesVisibles.filter(r=>normEmail(r.docente)===normEmail(me.email));
+  main.innerHTML=`<h2>Mis asignaciones</h2><p>Estas son las combinaciones de grupo y materia que tienes registradas. Las cargas antiguas también aparecen aunque su documento de asignación no exista.</p>${rows.length?`<div class="table-wrap"><table><thead><tr><th>Grupo</th><th>Tipo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Reporte</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(r.grupo)}</td><td>${esc(r.tipo||'')}</td><td>${esc(r.materia)}</td><td>${Number(r.alumnos)||0}</td><td>${Number(r.filas)||0}</td><td>${esc(r.estado||'CARGADO')}</td><td>${r.url?`<a href="${esc(r.url)}" target="_blank" rel="noopener">Abrir</a>`:'—'}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">Aún no tienes asignaciones ni cargas registradas.</div>'}`;
 }
 async function vistaMiAvance(){
-  const rows=await getCatalog('avance',['docente','==',me.email]);
-  main.innerHTML=`<h2>Mi avance</h2><table><tr><th>Grupo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Fecha</th></tr>${rows.map(r=>`<tr><td>${esc(r.grupo)}</td><td>${esc(r.asignatura)}</td><td>${r.alumnos||0}</td><td>${r.filas||0}</td><td>${esc(r.estado||'CARGADO')}</td><td>${fecha(r.fecha)}</td></tr>`).join('')}</table>`;
+  const d=await obtenerDatosGenerales();
+  const rows=d.cargas.filter(r=>normEmail(r.docente)===normEmail(me.email));
+  main.innerHTML=`<h2>Mi avance</h2><div class="table-wrap"><table><thead><tr><th>Grupo</th><th>Tipo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Fecha</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(r.grupo)}</td><td>${esc(r.tipo||'')}</td><td>${esc(r.materia)}</td><td>${Number(r.alumnos)||0}</td><td>${Number(r.filas)||0}</td><td>${esc(r.estado||'CARGADO')}</td><td>${fecha(r.fecha)}</td></tr>`).join('')||'<tr><td colspan="7" class="empty">No hay cargas registradas.</td></tr>'}</tbody></table></div>`;
 }
