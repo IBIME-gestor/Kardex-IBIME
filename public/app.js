@@ -10,8 +10,35 @@ const hash = s => { let a = 0xdeadbeef, b = 0x41c6ce57; for (let i = 0; i < s.le
 const normEmail = v => String(v || '').trim().toLowerCase();
 let me = null;
 
+const PRIVILEGES = {
+  dashboardGeneral: 'Dashboard general',
+  docentes: 'Panel de docentes',
+  cargas: 'Cargas y registros',
+  asignaciones: 'Asignaciones',
+  avance: 'Avance general',
+  grupos: 'Grupos',
+  asignaturas: 'Asignaturas',
+  alumnos: 'Alumnos'
+};
+const DIRECTIVO_DEFAULTS = Object.keys(PRIVILEGES);
+const allPrivs = () => Object.keys(PRIVILEGES);
+const hasPriv = p => me?.rol === 'admin' || (me?.rol === 'directivo' && Array.isArray(me?.permisos) && me.permisos.includes(p));
+const canOpen = k => me?.rol === 'admin' || ({
+  dashboard: hasPriv('dashboardGeneral'),
+  docentes: hasPriv('docentes'),
+  gruposES: hasPriv('grupos'),
+  gruposEN: hasPriv('grupos'),
+  asignaturas: hasPriv('asignaturas'),
+  alumnos: hasPriv('alumnos'),
+  asignaciones: hasPriv('asignaciones'),
+  avance: hasPriv('avance'),
+  importar: me?.rol === 'docente' || me?.rol === 'admin',
+  misAsignaciones: me?.rol === 'docente',
+  miAvance: me?.rol === 'docente'
+}[k]);
+
 const TABS = {
-  docentes: { n: 'Docentes', col: 'docentes', f: ['correo', 'nombre', 'matricula', 'rol'], key: 'correo', def: { rol: 'docente' }, types: { rol: ['docente', 'admin'] } },
+  docentes: { n: 'Docentes', col: 'docentes', f: ['correo', 'nombre', 'matricula', 'rol'], key: 'correo', def: { rol: 'docente' }, types: { rol: ['docente', 'directivo', 'admin'] } },
   gruposES: { n: 'Grupos español', col: 'grupos', f: ['nombre'], fix: { tipo: 'ESPAÑOL' }, w: ['tipo', '==', 'ESPAÑOL'], key: 'nombre' },
   gruposEN: { n: 'Grupos inglés', col: 'grupos', f: ['nombre'], fix: { tipo: 'INGLES' }, w: ['tipo', '==', 'INGLES'], key: 'nombre' },
   asignaturas: { n: 'Asignaturas', col: 'asignaturas', f: ['nombre', 'tipo'], key: 'nombre', types: { tipo: ['ESPAÑOL', 'INGLES'] } },
@@ -66,15 +93,20 @@ onAuthStateChanged(auth, async u => {
 
       const data = d.data() || {};
       const rol = String(data.rol || '').trim().toLowerCase();
-      if (!['docente', 'admin'].includes(rol)) {
+      if (!['docente', 'directivo', 'admin'].includes(rol)) {
         return bloqueo('Tu cuenta no tiene un rol de docente válido. Contacta al administrador.');
       }
       me = {
         email,
         nombre: data.nombre || u.displayName || email,
         foto: data.foto || u.photoURL || '',
-        rol
+        rol,
+        permisos: Array.isArray(data.permisos) ? data.permisos : (rol === 'directivo' ? DIRECTIVO_DEFAULTS : [])
       };
+      // Conserva/actualiza la foto pública de Google para identificar al docente/directivo.
+      if (!data.foto && u.photoURL && (rol === 'docente' || rol === 'directivo')) {
+        try { await setDoc(perfilRef, { foto: u.photoURL, actualizado: serverTimestamp() }, { merge: true }); } catch (_) {}
+      }
     }
 
     menu();
@@ -87,19 +119,38 @@ onAuthStateChanged(auth, async u => {
 
 const bloqueo = m => { main.innerHTML = `<div id="login"><p class="msg">${esc(m)}</p></div>`; };
 function menu() {
-  const adminItems = Object.keys(TABS).map(k => [k, TABS[k].n]);
-  const items = me.rol === 'admin'
-    ? [['dashboard', 'Dashboard'], ['importar', 'Cargar reportes'], ...adminItems]
-    : [['dashboard', 'Dashboard'], ['importar', 'Cargar reportes'], ['misAsignaciones', 'Mis asignaciones'], ['miAvance', 'Mi avance']];
+  let items;
+  if (me.rol === 'admin') {
+    items = [['dashboard', 'Dashboard'], ['importar', 'Cargar reportes'], ['cargasPanel', 'Cargas'], ['asignaciones', 'Asignaciones'], ['avance', 'Avance general'], ...Object.keys(TABS).filter(k => !['asignaciones','avance'].includes(k)).map(k => [k, TABS[k].n])];
+  } else if (me.rol === 'directivo') {
+    items = [['dashboard', 'Dashboard general']];
+    if (hasPriv('docentes')) items.push(['docentes', 'Docentes']);
+    if (hasPriv('cargas')) items.push(['cargasPanel', 'Cargas']);
+    if (hasPriv('asignaciones')) items.push(['asignaciones', 'Asignaciones']);
+    if (hasPriv('avance')) items.push(['avance', 'Avance general']);
+    if (hasPriv('grupos')) items.push(['gruposES', 'Grupos español'], ['gruposEN', 'Grupos inglés']);
+    if (hasPriv('asignaturas')) items.push(['asignaturas', 'Asignaturas']);
+    if (hasPriv('alumnos')) items.push(['alumnos', 'Alumnos']);
+  } else {
+    items = [['dashboard', 'Dashboard'], ['importar', 'Cargar reportes'], ['misAsignaciones', 'Mis asignaciones'], ['miAvance', 'Mi avance']];
+  }
   $('nav').innerHTML = items.map(([k, n]) => `<button data-k="${k}">${n}</button>`).join('');
   $('nav').onclick = e => e.target.dataset.k && ir(e.target.dataset.k);
 }
+
 function ir(k) {
   document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('on', b.dataset.k === k));
+  if (!canOpen(k) && k !== 'cargasPanel') {
+    main.innerHTML = '<div class="empty"><h3>Sin privilegios</h3><p>El administrador no ha otorgado acceso a este apartado.</p></div>';
+    return Promise.resolve();
+  }
   const action = k === 'dashboard' ? vistaDashboard
     : k === 'importar' ? vistaImportar
     : k === 'misAsignaciones' ? vistaMisAsignaciones
     : k === 'miAvance' ? vistaMiAvance
+    : k === 'cargasPanel' ? vistaCargasPanel
+    : k === 'asignaciones' ? vistaAsignacionesGeneral
+    : k === 'avance' ? vistaAvanceGeneral
     : () => vistaTab(k);
   return Promise.resolve().then(action).catch(e => {
     console.error('Error en la vista', k, e);
@@ -116,28 +167,68 @@ async function getCatalog(col, filtro = null) {
   return (await getDocs(q)).docs.map(d => ({ id: d.id, ...d.data() }));
 }
 
+async function obtenerDatosGenerales() {
+  const [docs, av, asig, cal, alumnos, grupos, mats] = await Promise.all([
+    getDocs(collection(db, 'docentes')), getDocs(collection(db, 'avance')), getDocs(collection(db, 'asignaciones')),
+    getDocs(collection(db, 'calificaciones')), getDocs(collection(db, 'alumnos')), getDocs(collection(db, 'grupos')), getDocs(collection(db, 'asignaturas'))
+  ]);
+  const docentes = docs.docs.map(x => ({id:x.id,...x.data()})).filter(x => ['docente','directivo'].includes(String(x.rol||'').toLowerCase()));
+  const avances = av.docs.map(x => ({id:x.id,...x.data()}));
+  const asignaciones = asig.docs.map(x => ({id:x.id,...x.data()}));
+  const califs = cal.docs.map(x => ({id:x.id,...x.data()}));
+  const gruposRows = grupos.docs.map(x => ({id:x.id,...x.data()}));
+  const cargasMap = new Map();
+  const addCarga = (r, source) => {
+    const docente = normEmail(r.docente || '');
+    const grupo = String(r.grupo || '').trim();
+    const materia = String(r.asignatura || r.materia || '').trim();
+    if (!docente && !grupo && !materia) return;
+    const key = `${docente}|${grupo}|${materia}`;
+    const old = cargasMap.get(key) || {docente,grupo,materia,filas:0,alumnos:0,estado:'CARGADO',url:'',sources:new Set()};
+    old.sources.add(source);
+    old.filas = Math.max(old.filas, Number(r.filas)||0);
+    old.alumnos = Math.max(old.alumnos, Number(r.alumnos)||0);
+    old.url = old.url || r.url || '';
+    if (r.estado) old.estado = r.estado;
+    cargasMap.set(key, old);
+  };
+  avances.forEach(x=>addCarga(x,'avance'));
+  asignaciones.forEach(x=>addCarga(x,'asignacion'));
+  // Compatibilidad con calificaciones antiguas: si no existe avance/asignación, también cuentan como carga.
+  const legacyCounts = new Map();
+  califs.forEach(x=>{
+    const docente=normEmail(x.docente||''); const grupo=String(x.grupo||'').trim(); const materia=String(x.asignatura||x.materia||'').trim();
+    if(!docente||!grupo||!materia)return;
+    const key=`${docente}|${grupo}|${materia}`; legacyCounts.set(key,(legacyCounts.get(key)||0)+1); addCarga(x,'calificacion');
+  });
+  for (const [key,n] of legacyCounts) { const c=cargasMap.get(key); if(c) c.filas=Math.max(c.filas,n); }
+  return {docentes,avances,asignaciones,califs,alumnos:alumnos.docs.map(x=>x.data()),grupos:gruposRows,mats:mats.docs.map(x=>x.data()),cargas:[...cargasMap.values()]};
+}
+
 async function vistaDashboard() {
-  if (me.rol === 'admin') {
-    const [docs, av, cal, alumnos, grupos, mats] = await Promise.all([
-      getDocs(collection(db, 'docentes')), getDocs(collection(db, 'avance')), getDocs(collection(db, 'calificaciones')),
-      getDocs(collection(db, 'alumnos')), getDocs(collection(db, 'grupos')), getDocs(collection(db, 'asignaturas'))
-    ]);
-    const docentes = docs.docs.map(x => x.data()).filter(x => x.rol === 'docente');
-    const cargas = av.docs.map(x => x.data());
-    main.innerHTML = `<h2>Dashboard del administrador</h2>
-      <div class="cards"><div><b>${docentes.length}</b><span>Docentes</span></div><div><b>${grupos.size}</b><span>Grupos</span></div><div><b>${mats.size}</b><span>Asignaturas</span></div><div><b>${alumnos.size}</b><span>Alumnos</span></div><div><b>${cargas.length}</b><span>Cargas</span></div><div><b>${cal.size}</b><span>Calificaciones</span></div></div>
-      <h3>Avance de docentes</h3>
-      <table><tr><th>Docente</th><th>Correo</th><th>Cargas</th><th>Registros</th><th>Editar</th></tr>${docentes.map(d => { const mine = cargas.filter(a => a.docente === d.correo); return `<tr><td>${esc(d.nombre)}</td><td>${esc(d.correo)}</td><td>${mine.length}</td><td>${mine.reduce((s,a)=>s+(Number(a.filas)||0),0)}</td><td><button data-edit-doc="${esc(d.correo)}">Editar</button></td></tr>`; }).join('')}</table>`;
-    main.querySelectorAll('[data-edit-doc]').forEach(b => b.onclick = () => editarDocente(b.dataset.editDoc));
+  if (me.rol === 'admin' || me.rol === 'directivo') {
+    const d = await obtenerDatosGenerales();
+    const cargas = d.cargas;
+    const gruposConCarga = new Set(cargas.map(x=>String(x.grupo||'').toUpperCase()).filter(Boolean));
+    const totalGrupos = d.grupos.length, sinCarga = d.grupos.filter(g=>!gruposConCarga.has(String(g.nombre||'').toUpperCase()));
+    main.innerHTML = `<h2>${me.rol === 'admin' ? 'Dashboard del administrador' : 'Dashboard general'}</h2>
+      <div class="cards"><div><b>${d.docentes.length}</b><span>Docentes</span></div><div><b>${totalGrupos}</b><span>Grupos</span></div><div><b>${d.mats.length}</b><span>Asignaturas</span></div><div><b>${d.alumnos.length}</b><span>Alumnos</span></div><div><b>${cargas.length}</b><span>Cargas detectadas</span></div><div><b>${d.califs.length}</b><span>Calificaciones</span></div></div>
+      <div class="dashboard-grid"><section><h3>Estado de grupos</h3><table><tr><th>Grupo</th><th>Tipo</th><th>Estado</th><th>Cargas</th></tr>${d.grupos.map(g=>{const n=String(g.nombre||'').toUpperCase(), cs=cargas.filter(c=>String(c.grupo||'').toUpperCase()===n);return `<tr><td>${esc(g.nombre)}</td><td>${esc(g.tipo||'')}</td><td><span class="status ${cs.length?'ok':'pending'}">${cs.length?'CARGADO':'PENDIENTE'}</span></td><td>${cs.length}</td></tr>`}).join('')}</table>${sinCarga.length?`<p class="muted">Grupos pendientes: ${esc(sinCarga.map(g=>g.nombre).join(', '))}</p>`:''}</section>
+      <section><h3>Docentes y sus cargas</h3><table><tr><th>Docente</th><th>Foto</th><th>Cargas</th><th>Registros</th></tr>${d.docentes.map(t=>{const mine=cargas.filter(c=>normEmail(c.docente)===normEmail(t.correo));return `<tr><td>${esc(t.nombre||t.correo)}</td><td>${t.foto?`<img class="avatar-sm" src="${esc(t.foto)}" alt="Foto">`:'—'}</td><td>${mine.length}</td><td>${mine.reduce((s,c)=>s+(Number(c.filas)||0),0)}</td></tr>`}).join('')}</table></section></div>`;
     return;
   }
-  const ds = (await getDocs(query(collection(db, 'avance'), where('docente', '==', me.email)))).docs.map(x => ({ id:x.id, ...x.data() }));
-  const total = ds.reduce((s,a) => s + (Number(a.filas)||0), 0), alumnos = ds.reduce((s,a) => s + (Number(a.alumnos)||0), 0);
-  main.innerHTML = `<div class="perfil">${me.foto ? `<img src="${esc(me.foto)}" alt="Foto">` : ''}<div><h2>Hola, ${esc(me.nombre)}</h2><p>${esc(me.email)} · Docente</p></div></div>
-    <div class="cards"><div><b>${ds.length}</b><span>Cargas realizadas</span></div><div><b>${alumnos}</b><span>Alumnos detectados</span></div><div><b>${total}</b><span>Registros importados</span></div></div>
-    <div class="acciones"><button class="p" id="nueva">+ Cargar nuevo reporte</button></div>
-    <h3>Grupos y materias cargados</h3>${ds.length ? `<table><tr><th>Grupo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Fecha</th></tr>${ds.map(a => `<tr><td>${esc(a.grupo)}</td><td>${esc(a.asignatura)}</td><td>${Number(a.alumnos)||0}</td><td>${Number(a.filas)||0}</td><td>${esc(a.estado || 'CARGADO')}</td><td>${fecha(a.fecha)}</td></tr>`).join('')}</table>` : '<div class="empty">Todavía no has cargado reportes.</div>'}`;
-  $('nueva').onclick = () => ir('importar');
+  const [av, asig, cal] = await Promise.all([
+    getCatalog('avance',['docente','==',me.email]),
+    getCatalog('asignaciones',['docente','==',me.email]),
+    getCatalog('calificaciones',['docente','==',me.email])
+  ]);
+  const map=new Map();
+  [...av,...asig].forEach(a=>{const key=`${a.grupo||''}|${a.asignatura||a.materia||''}`;map.set(key,{...map.get(key),...a});});
+  cal.forEach(c=>{const key=`${c.grupo||''}|${c.asignatura||c.materia||''}`;const x=map.get(key)||{grupo:c.grupo,asignatura:c.asignatura||c.materia};x.filas=Math.max(Number(x.filas)||0,1);x._cal=(x._cal||0)+1;map.set(key,x);});
+  const ds=[...map.values()];
+  const total=ds.reduce((s,a)=>s+(Number(a.filas)||0),0), alumnos=ds.reduce((s,a)=>s+(Number(a.alumnos)||0),0);
+  main.innerHTML=`<div class="perfil">${me.foto?`<img src="${esc(me.foto)}" alt="Foto">`:''}<div><h2>Hola, ${esc(me.nombre)}</h2><p>${esc(me.email)} · ${esc(me.rol)}</p></div></div><div class="cards"><div><b>${ds.length}</b><span>Cargas realizadas</span></div><div><b>${alumnos}</b><span>Alumnos detectados</span></div><div><b>${total}</b><span>Registros importados</span></div><div><b>${cal.length}</b><span>Calificaciones</span></div></div><div class="acciones"><button class="p" id="nueva">+ Cargar nuevo reporte</button></div><h3>Grupos y materias cargados</h3>${ds.length?`<table><tr><th>Grupo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Fecha</th></tr>${ds.map(a=>`<tr><td>${esc(a.grupo)}</td><td>${esc(a.asignatura||a.materia)}</td><td>${Number(a.alumnos)||0}</td><td>${Number(a.filas)||0}</td><td>${esc(a.estado||'CARGADO')}</td><td>${fecha(a.fecha||a.actualizado)}</td></tr>`).join('')}</table>`:'<div class="empty">Todavía no hay cargas asociadas a tu cuenta.</div>'}`;
+  $('nueva').onclick=()=>ir('importar');
 }
 
 async function vistaImportar() {
@@ -275,7 +366,7 @@ async function guardar(t, objs){
     objs.slice(i,i+450).forEach(raw=>{
       let o=normalizarGuardado({...t.def,...raw,...t.fix});
       const existingId=o._id; delete o._id;
-      const id=existingId || (t.key ? String(o[t.key]||'').toLowerCase().trim() : hash(t.f.map(f=>o[f]??'').join('|')+(t.fix?.tipo??'')));
+      const id=existingId || (t.key ? (t.col === 'grupos' ? hash([o.nombre, o.tipo].map(v=>String(v||'').trim().toUpperCase()).join('|')) : String(o[t.key]||'').toLowerCase().trim()) : hash(t.f.map(f=>o[f]??'').join('|')+(t.fix?.tipo??'')));
       if(!id)return;
       if(t.key && t.key !== 'correo') o[t.key]=String(o[t.key]||'').trim().toUpperCase();
       b.set(doc(db,t.col,id),o,{merge:true});
@@ -345,7 +436,7 @@ function leerExcelAlumnos(file) {
 function normalizarCatalogo(k, value) { return String(value ?? '').trim().replace(/\s+/g, ' ').toUpperCase(); }
 
 function normalizarGuardado(obj) {
-  const protectedFields = new Set(['correo', 'docente', 'rol', 'url', 'foto']);
+  const protectedFields = new Set(['correo', 'docente', 'rol', 'url', 'foto', 'permisos']);
   const out = {};
   for (const [key, value] of Object.entries(obj)) {
     if (value === undefined || value === null) { out[key] = value; continue; }
@@ -436,6 +527,7 @@ function renderBulkEditor(k, rows, existing) {
 }
 
 async function vistaTab(k){
+  if (k === 'docentes') return vistaDocentesPanel();
   const t=TABS[k]; let q=collection(db,t.col); if(t.w && !['gruposES','gruposEN'].includes(k))q=query(q,where(...t.w)); const ds=(await getDocs(q)).docs;
   let rows=ds.map(d=>({id:d.id,...d.data()}));
   if(k==='gruposES') rows=rows.filter(r=>String(r.tipo||'').toUpperCase()==='ESPAÑOL');
@@ -469,7 +561,56 @@ async function vistaTab(k){
   $('buscar').oninput=e=>{const term=e.target.value.toLowerCase();main.querySelectorAll('table tr').forEach((tr,i)=>{if(i===0)return;tr.hidden=!tr.textContent.toLowerCase().includes(term);});};
 }
 
-async function editarDocente(correo){ const d=await getDoc(doc(db,'docentes',correo)); if(d.exists()){ vistaTab('docentes'); setTimeout(()=>document.querySelector(`[data-edit="${CSS.escape(correo)}"]`)?.click(),0); } }
+async function vistaDocentesPanel(){
+  const ds=(await getDocs(collection(db,'docentes'))).docs.map(d=>({id:d.id,...d.data()})).filter(d=>['docente','directivo'].includes(String(d.rol||'').toLowerCase()));
+  let cargas=[]; try { const d=await obtenerDatosGenerales(); cargas=d.cargas; } catch(_) {}
+  main.innerHTML=`<div class="section-head"><div><h2>Panel de docentes</h2><p>Consulta su foto, rol, privilegios, cargas y registros.</p></div><div class="actions"><button class="p" id="nuevoDoc">+ Nuevo perfil</button><button id="actualizarDocs">Actualizar</button></div></div><div class="table-wrap"><table><tr><th>Foto</th><th>Docente</th><th>Correo</th><th>Rol</th><th>Privilegios</th><th>Cargas</th><th>Registros</th><th>Acciones</th></tr>${ds.map(d=>{const mine=cargas.filter(c=>normEmail(c.docente)===normEmail(d.correo));return `<tr><td>${d.foto?`<img class="avatar-sm" src="${esc(d.foto)}" alt="Foto de ${esc(d.nombre||'docente')}">`:'<div class="avatar-placeholder">—</div>'}</td><td>${esc(d.nombre||'')}</td><td>${esc(d.correo||d.id)}</td><td><span class="role-badge">${esc(String(d.rol||'docente').toUpperCase())}</span></td><td>${esc((Array.isArray(d.permisos)?d.permisos:[]).map(p=>PRIVILEGES[p]||p).join(', ')||'—')}</td><td>${mine.length}</td><td>${mine.reduce((s,c)=>s+(Number(c.filas)||0),0)}</td><td class="actions"><button data-edit-doc2="${esc(d.id)}">Editar</button><button data-view-doc="${esc(d.correo)}">Ver cargas</button></td></tr>`}).join('')}</table></div>`;
+  $('nuevoDoc').onclick=()=>editarDocente(null);
+  $('actualizarDocs').onclick=()=>vistaDocentesPanel();
+  main.querySelectorAll('[data-edit-doc2]').forEach(b=>b.onclick=()=>editarDocente(b.dataset.editDoc2));
+  main.querySelectorAll('[data-view-doc]').forEach(b=>b.onclick=()=>vistaCargasPanel(b.dataset.viewDoc));
+}
+
+async function editarDocente(correo){
+  const data=correo ? (await getDoc(doc(db,'docentes',correo))).data() || {} : {};
+  const isAdmin = correo && normEmail(correo)===normEmail(ADMIN_EMAIL);
+  const permisos=Array.isArray(data.permisos)?data.permisos:[];
+  main.innerHTML=`<div class="editor"><h2>${correo?'Editar docente/directivo':'Nuevo docente/directivo'}</h2><div class="form-grid">
+    <label>Correo<input id="edCorreo" value="${esc(correo||'')}" ${correo?'readonly':''}></label>
+    <label>Nombre<input id="edNombre" value="${esc(data.nombre||'')}"></label>
+    <label>Foto URL<input id="edFoto" value="${esc(data.foto||'')}" placeholder="URL de foto de Google"></label>
+    <label>Rol<select id="edRol" ${isAdmin?'disabled':''}><option value="docente" ${data.rol==='docente'?'selected':''}>Docente</option><option value="directivo" ${data.rol==='directivo'?'selected':''}>Directivo</option><option value="admin" ${data.rol==='admin'?'selected':''}>Administrador</option></select></label>
+  </div><h3>Privilegios del directivo</h3><div class="priv-grid">${Object.entries(PRIVILEGES).map(([k,n])=>`<label><input type="checkbox" class="priv-check" value="${k}" ${permisos.includes(k)?'checked':''}> ${esc(n)}</label>`).join('')}</div><div class="actions"><button id="cancelEd">Cancelar</button><button class="p" id="saveEd">Guardar privilegios y perfil</button></div></div>`;
+  $('cancelEd').onclick=()=>vistaDocentesPanel();
+  $('saveEd').onclick=async()=>{
+    const em=normEmail($('edCorreo').value), rol=isAdmin?'admin':$('edRol').value, priv=[...document.querySelectorAll('.priv-check:checked')].map(x=>x.value);
+    if(!em || !em.endsWith('@'+DOMINIO)) return alert('Usa un correo @ibime.edu.mx.');
+    if(rol==='directivo' && !priv.length) return alert('Selecciona al menos un privilegio para el directivo.');
+    try{ await setDoc(doc(db,'docentes',em),normalizarGuardado({correo:em,nombre:$('edNombre').value.trim(),foto:$('edFoto').value.trim(),rol,permisos:rol==='admin'?allPrivs():priv,actualizado:serverTimestamp()}),{merge:true}); alert('Perfil actualizado.'); vistaDocentesPanel(); }catch(e){alert('No se pudo guardar: '+e.message);}
+  };
+}
+
+async function vistaCargasPanel(filtroDocente=''){
+  const d=await obtenerDatosGenerales();
+  const rows=filtroDocente?d.cargas.filter(c=>normEmail(c.docente)===normEmail(filtroDocente)):d.cargas;
+  main.innerHTML=`<div class="section-head"><div><h2>Cargas y registros</h2><p>Detalle de cada grupo/materia cargado y cuántos registros produjo.</p></div><button id="backDash">Dashboard</button></div><div class="tools"><input id="buscarCarga" placeholder="Buscar docente, grupo o materia..."><button id="refCargas">Actualizar</button></div><div class="table-wrap"><table><tr><th>Docente</th><th>Grupo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Origen</th></tr>${rows.map(r=>`<tr><td>${esc(r.docente)}</td><td>${esc(r.grupo)}</td><td>${esc(r.materia)}</td><td>${Number(r.alumnos)||0}</td><td>${Number(r.filas)||0}</td><td><span class="status ${String(r.estado).toUpperCase()==='CARGADO'?'ok':'pending'}">${esc(r.estado||'CARGADO')}</span></td><td>${esc([...r.sources].join(', '))}</td></tr>`).join('')||'<tr><td colspan="7" class="empty">No hay cargas registradas.</td></tr>'}</table></div>`;
+  $('backDash').onclick=()=>ir('dashboard'); $('refCargas').onclick=()=>vistaCargasPanel(filtroDocente); $('buscarCarga').oninput=e=>{const term=e.target.value.toLowerCase();main.querySelectorAll('table tr').forEach((tr,i)=>{if(i)tr.hidden=!tr.textContent.toLowerCase().includes(term)})};
+}
+
+async function vistaAsignacionesGeneral(){
+  const [asig,av]=await Promise.all([getDocs(collection(db,'asignaciones')),getDocs(collection(db,'avance'))]);
+  const map=new Map();
+  asig.docs.forEach(d=>map.set(d.id,{id:d.id,...d.data()}));
+  av.docs.forEach(d=>{const x={id:d.id,...d.data()};const old=map.get(x.id)||{};map.set(x.id,{...old,...x,asignatura:x.asignatura||old.materia,materia:x.materia||old.materia})});
+  const rows=[...map.values()];
+  main.innerHTML=`<h2>Asignaciones</h2><p>Grupo, materia, docente y enlace de cada carga registrada.</p><div class="table-wrap"><table><tr><th>Docente</th><th>Grupo</th><th>Materia</th><th>Tipo</th><th>Estado</th><th>Enlace</th></tr>${rows.map(r=>`<tr><td>${esc(r.docente||'')}</td><td>${esc(r.grupo||'')}</td><td>${esc(r.materia||r.asignatura||'')}</td><td>${esc(r.tipo||'')}</td><td>${esc(r.estado||'CARGADO')}</td><td>${r.url?`<a href="${esc(r.url)}" target="_blank" rel="noopener">Abrir reporte</a>`:'—'}</td></tr>`).join('')||'<tr><td colspan="6" class="empty">No hay asignaciones registradas.</td></tr>'}</table></div>`;
+}
+
+async function vistaAvanceGeneral(){
+  const d=await obtenerDatosGenerales();
+  main.innerHTML=`<h2>Avance general</h2><p>Estado de grupos y avance por docente.</p><div class="table-wrap"><table><tr><th>Docente</th><th>Grupo</th><th>Materia</th><th>Alumnos</th><th>Registros</th><th>Estado</th><th>Fecha</th></tr>${d.cargas.map(r=>`<tr><td>${esc(r.docente)}</td><td>${esc(r.grupo)}</td><td>${esc(r.materia)}</td><td>${Number(r.alumnos)||0}</td><td>${Number(r.filas)||0}</td><td>${esc(r.estado||'CARGADO')}</td><td>${fecha(r.fecha)}</td></tr>`).join('')||'<tr><td colspan="7" class="empty">No hay avance registrado.</td></tr>'}</table></div>`;
+}
+
 
 async function vistaMisAsignaciones(){
   const rows=await getCatalog('asignaciones',['docente','==',me.email]);
