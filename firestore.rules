@@ -85,6 +85,14 @@ service cloud.firestore {
       return exists(/databases/$(db)/documents/alumnos/$(em()));
     }
 
+    // Directivo con al menos un privilegio: puede leer los catálogos básicos
+    // (docentes, grupos, asignaturas) para mostrar nombres en sus pantallas.
+    function hasAnyPrivilege() {
+      return isDirectivo()
+        && ((profile().permisos is list && profile().permisos.size() > 0)
+          || (profile().privilegios is list && profile().privilegios.size() > 0));
+    }
+
     function canSeeGeneralData() {
       return privilege('dashboardGeneral')
         || privilege('docentes')
@@ -97,7 +105,7 @@ service cloud.firestore {
     // ================================================================
     match /docentes/{id} {
       allow read: if admin()
-        || (isDirectivo() && canSeeGeneralData())
+        || hasAnyPrivilege()
         || ownDocente(id);
 
       // El alumno consulta (solo por id, sin listar) nombre y foto de sus
@@ -130,10 +138,7 @@ service cloud.firestore {
     // GRUPOS
     // ================================================================
     match /grupos/{id} {
-      allow read: if docente()
-        || (isDirectivo() && (
-          canSeeGeneralData() || privilege('grupos')
-        ));
+      allow read: if docente() || hasAnyPrivilege();
 
       // Alta, edición y borrado de grupos solamente desde Admin.
       allow write: if admin();
@@ -143,10 +148,7 @@ service cloud.firestore {
     // ASIGNATURAS
     // ================================================================
     match /asignaturas/{id} {
-      allow read: if docente()
-        || (isDirectivo() && (
-          canSeeGeneralData() || privilege('asignaturas')
-        ));
+      allow read: if docente() || hasAnyPrivilege();
 
       allow write: if admin();
     }
@@ -169,6 +171,10 @@ service cloud.firestore {
       allow create, update: if admin()
         || (docente()
           && request.resource.data.correo == id);
+
+      // El alumno solo puede actualizar su propia foto de perfil de Google.
+      allow update: if ownAlumno(id)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['foto']);
 
       allow delete: if admin();
     }
