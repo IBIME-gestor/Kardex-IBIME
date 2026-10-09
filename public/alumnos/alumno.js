@@ -1,7 +1,7 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
-import { getFirestore, collection, doc, getDoc, getDocs, query, where } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
-import { CONFIG, DOMINIO } from '../config.js';
+import { getFirestore, collection, doc, getDoc, getDocs, setDoc, query, where } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
+import { CONFIG, DOMINIO, ADMIN_EMAIL } from '../config.js';
 
 const app = initializeApp(CONFIG), auth = getAuth(app), db = getFirestore(app);
 const $ = id => document.getElementById(id), main = $('main');
@@ -67,10 +67,21 @@ main.addEventListener('click', e => {
   if (e.target.closest('#in')) return iniciarSesion();
   const head = e.target.closest('.mat-head');
   if (head) return alternar(head);
+  if (e.target.closest('#verIr')) return verOtro();
   const chip = e.target.closest('[data-f]');
   if (chip && estado) { estado.filtro = chip.dataset.f; pintarControles(); pintarLista(); }
 });
 $('out').onclick = () => signOut(auth);
+main.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.id === 'verCorreo') verOtro(); });
+function verOtro() {
+  const c = normEmail($('verCorreo')?.value);
+  if (c) location.search = '?ver=' + encodeURIComponent(c);
+}
+const esAdminCuenta = async email => {
+  if (email === normEmail(ADMIN_EMAIL)) return true;
+  try { const s = await getDoc(doc(db, 'docentes', email)); return String(s.data()?.rol || '').toLowerCase() === 'admin'; }
+  catch (_) { return false; }
+};
 
 // Si una foto de Google no carga, se sustituye por las iniciales.
 document.addEventListener('error', e => {
@@ -106,7 +117,12 @@ onAuthStateChanged(auth, async u => {
   main.innerHTML = '<div class="al-card al-loading"><div class="spin" aria-hidden="true"></div><p>Cargando tus calificaciones…</p></div>';
   try {
     await u.getIdToken(true);
-    estado = await cargar(u, email);
+    // Vista de administrador: /alumnos/?ver=correo@ibime.edu.mx
+    const ver = normEmail(new URLSearchParams(location.search).get('ver'));
+    const vistaAdmin = !!ver && await esAdminCuenta(email);
+    const objetivo = vistaAdmin ? ver : email;
+    if (vistaAdmin && !objetivo.endsWith('@' + DOMINIO)) throw new Error(`El correo debe ser @${DOMINIO}.`);
+    estado = await cargar(u, email, objetivo, vistaAdmin);
     pintar();
   } catch (e) {
     console.error('Panel alumno', e);
@@ -118,7 +134,7 @@ onAuthStateChanged(auth, async u => {
 });
 
 /* ============================== DATOS ============================== */
-async function cargar(u, email) {
+async function cargar(u, cuenta, email, vistaAdmin) {
   const [alSnap, calSnap] = await Promise.all([
     getDoc(doc(db, 'alumnos', email)).catch(() => null),
     getDocs(query(collection(db, 'calificaciones'), where('correo', '==', email)))
@@ -126,9 +142,13 @@ async function cargar(u, email) {
   const al = alSnap && alSnap.exists() ? alSnap.data() : {};
   const filas = calSnap.docs.map(d => d.data()).filter(r => r.asignatura || r.materia);
 
-  const nombre = titleCase(al.nombre || filas.find(r => r.alumno)?.alumno || u.displayName || email.split('@')[0], { roman: false });
+  // Guarda la foto de Google del alumno para que el administrador pueda verla en su vista.
+  if (!vistaAdmin && alSnap && alSnap.exists() && u.photoURL && al.foto !== u.photoURL) {
+    setDoc(doc(db, 'alumnos', email), { foto: u.photoURL }, { merge: true }).catch(() => {});
+  }
+  const nombre = titleCase(al.nombre || filas.find(r => r.alumno)?.alumno || (!vistaAdmin && u.displayName) || email.split('@')[0], { roman: false });
   const perfil = {
-    nombre, email, foto: u.photoURL || '',
+    nombre, email, foto: vistaAdmin ? (al.foto || '') : (u.photoURL || ''),
     matricula: String(al.matricula || '').trim(),
     grupoEs: String(al.grupoEspanol || '').trim(),
     grupoEn: String(al.grupoIngles || '').trim(),
@@ -168,7 +188,7 @@ async function cargar(u, email) {
   }).sort((a, b) => sortText(a.nombre, b.nombre));
   materias.forEach((m, i) => { m.id = 'mat-' + i; });
 
-  return { user: u, email, perfil, materias, filtro: 'todas', abiertas: new Set() };
+  return { user: u, email, cuenta, vistaAdmin, perfil, materias, filtro: 'todas', abiertas: new Set() };
 }
 
 /* ============================== VISTA ============================== */
@@ -183,7 +203,16 @@ function pintar() {
   const rojas = materias.reduce((s, m) => s + m.rojas, 0), amarillas = materias.reduce((s, m) => s + m.amarillas, 0);
 
   const dato = (et, v) => v ? `<div class="al-dato"><small>${et}</small><b>${esc(v)}</b></div>` : '';
-  main.innerHTML = `
+  const barra = estado.vistaAdmin ? `
+    <div class="al-admin-bar">
+      <span><b>Vista de administrador</b> · Estás viendo el panel de <strong>${esc(perfil.email)}</strong> tal como lo ve el alumno.</span>
+      <span class="al-admin-ctl">
+        <input id="verCorreo" type="email" placeholder="otro@${DOMINIO}" autocomplete="off" aria-label="Correo de otro alumno">
+        <button type="button" id="verIr">Ver</button>
+        <a href="/">← Portal</a>
+      </span>
+    </div>` : '';
+  main.innerHTML = `${barra}
     <section class="al-perfil">
       ${avatar(perfil.foto, perfil.nombre, 'av-xl')}
       <div class="al-perfil-info">
@@ -278,11 +307,11 @@ function linkMateria(m) {
     ? '\n\nActividades que me gustaría revisar:\n' + marcadas.map(f => `• ${titleCase(f.actividad, { roman: false }) || 'Actividad'} (${fmtFecha(f.fecha, f.ts) || 's/f'}): ${fmtNota(f.calif)}`).join('\n')
     : '';
   const cuerpo = `${saludo(m)}${firma()} Le escribo para solicitar una aclaración sobre mis calificaciones de la materia ${m.nombre}.${lista}\n\nQuedo atento(a) a su respuesta. Muchas gracias.\n`;
-  return gmail(m.docente, `Solicitud de aclaración · ${m.nombre}`, cuerpo, estado.email);
+  return gmail(m.docente, `Solicitud de aclaración · ${m.nombre}`, cuerpo, estado.cuenta);
 }
 function linkActividad(m, f) {
   const cuerpo = `${saludo(m)}${firma()} Le escribo para solicitar una aclaración sobre una calificación de la materia ${m.nombre}:\n\n• Actividad: ${titleCase(f.actividad, { roman: false }) || 'Sin nombre'}\n• Fecha: ${fmtFecha(f.fecha, f.ts) || 'Sin fecha'}\n• Calificación registrada: ${fmtNota(f.calif)}\n\nQuedo atento(a) a su respuesta. Muchas gracias.\n`;
-  return gmail(m.docente, `Aclaración de calificación · ${m.nombre}`, cuerpo, estado.email);
+  return gmail(m.docente, `Aclaración de calificación · ${m.nombre}`, cuerpo, estado.cuenta);
 }
 
 function cuerpo(m) {
