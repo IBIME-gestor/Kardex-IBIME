@@ -1405,3 +1405,6 @@ body:not(:has(#login)) .install-btn:hover{
 .assignment-row{align-items:center}
 .cascade-row a{font-weight:700}
 @media(max-width:800px){.assignment-row{align-items:flex-start;flex-direction:column;gap:5px}}
+
+.sync-aviso{display:flex;justify-content:space-between;align-items:center;gap:12px 18px;flex-wrap:wrap;background:#fff6dc;border:1px solid #f2d98a;color:#6f4a05;border-radius:14px;padding:12px 16px;margin:0 0 16px;font-size:13.5px}
+.sync-aviso button{white-space:nowrap}
