@@ -3,6 +3,7 @@ import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChang
 import { getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, query, where, writeBatch, serverTimestamp, arrayUnion, getCountFromServer } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 import { CONFIG, BRIDGE_URL, ADMIN_EMAIL, DOMINIO } from './config.js';
 
+const APP_VERSION = '2026.10.09-r6';
 const app = initializeApp(CONFIG), auth = getAuth(app), db = getFirestore(app);
 const $ = id => document.getElementById(id), main = $('main');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -13,6 +14,9 @@ const docenteNombre = (docentes, email) => docentes.find(x => normEmail(x.correo
 const cargaKey = (docente, grupo, materia) => `${normEmail(docente)}|${normalizarCatalogo('grupos', grupo)}|${normalizarCatalogo('grupos', materia)}`;
 const grupoKey = (grupo, tipo='') => `${normalizarCatalogo('grupos', grupo)}|${String(tipo||'').toUpperCase()}`;
 let me = null;
+const pintarVersion = () => { const f = document.querySelector('.site-footer'); if (f && !f.dataset.v) { f.dataset.v = 1; f.insertAdjacentHTML('beforeend', `<span>•</span><span>v${APP_VERSION}</span>`); } };
+pintarVersion();
+const diagnostico = e => `Cuenta: ${me?.email || '—'} · Rol: ${me?.rol || '—'} · Privilegios: ${(me?.permisos || []).join(', ') || 'ninguno'} · Versión: ${APP_VERSION}${e?.code ? ' · Código: ' + e.code : ''}`;
 
 const PRIVILEGES = {
   dashboardGeneral: 'Dashboard general',
@@ -22,7 +26,8 @@ const PRIVILEGES = {
   avance: 'Avance general',
   grupos: 'Grupos',
   asignaturas: 'Asignaturas',
-  alumnos: 'Alumnos'
+  alumnos: 'Alumnos',
+  verAlumno: 'Ver como alumno'
 };
 const DIRECTIVO_DEFAULTS = Object.keys(PRIVILEGES);
 const allPrivs = () => Object.keys(PRIVILEGES);
@@ -37,6 +42,7 @@ const canOpen = k => me?.rol === 'admin' || ({
   alumnos: hasPriv('alumnos'),
   asignaciones: hasPriv('asignaciones'),
   avance: hasPriv('avance'),
+  verAlumno: hasPriv('verAlumno'),
   importar: me?.rol === 'docente' || me?.rol === 'admin',
   misAsignaciones: me?.rol === 'docente',
   miAvance: me?.rol === 'docente'
@@ -144,6 +150,7 @@ function menu() {
     if (hasPriv('grupos')) items.push(['gruposES', 'Grupos español'], ['gruposEN', 'Grupos inglés']);
     if (hasPriv('asignaturas')) items.push(['asignaturas', 'Asignaturas']);
     if (hasPriv('alumnos')) items.push(['alumnos', 'Alumnos']);
+    if (hasPriv('verAlumno')) items.push(['verAlumno', 'Ver como alumno']);
   } else {
     items = [['dashboard', 'Dashboard'], ['importar', 'Cargar reportes'], ['misAsignaciones', 'Mis asignaciones'], ['miAvance', 'Mi avance']];
   }
@@ -168,7 +175,7 @@ function ir(k) {
     : () => vistaTab(k);
   return Promise.resolve().then(action).catch(e => {
     console.error('Error en la vista', k, e);
-    main.innerHTML = `<div class="empty"><h3>No se pudo cargar esta sección</h3><p>${esc(e?.message || 'Error desconocido')}</p><button id="reintentar" class="p">Reintentar</button></div>`;
+    main.innerHTML = `<div class="empty"><h3>No se pudo cargar esta sección</h3><p>${esc(e?.message || 'Error desconocido')}</p><p class="diag">${esc(diagnostico(e))}</p><button id="reintentar" class="p">Reintentar</button></div>`;
     $('reintentar').onclick = () => ir(k);
   });
 }
@@ -178,7 +185,8 @@ function options(list, value = '') { return list.map(x => `<option value="${esc(
 
 async function getCatalog(col, filtro = null) {
   let q = collection(db, col); if (filtro) q = query(q, where(...filtro));
-  return (await getDocs(q)).docs.map(d => ({ id: d.id, ...d.data() }));
+  try { return (await getDocs(q)).docs.map(d => ({ id: d.id, ...d.data() })); }
+  catch (e) { e.message = `[${col}] ${e.message}`; throw e; }
 }
 
 function groupKey(nombre, tipo='') {
@@ -214,9 +222,12 @@ async function modoLite() {
 
 // Lee una colección y, si el perfil no tiene permiso sobre ella, devuelve vacío
 // en lugar de romper toda la pantalla (cada rol ve solo lo que le corresponde).
-async function safeDocs(q) {
+async function safeDocs(q, nombre = '', denegadas = null) {
   try { return await getDocs(q); }
-  catch (e) { if (e?.code === 'permission-denied') return { docs: [] }; throw e; }
+  catch (e) {
+    if (e?.code === 'permission-denied') { console.warn('Sin permiso de lectura en', nombre); denegadas?.push(nombre); return { docs: [] }; }
+    e.message = `[${nombre}] ${e.message}`; throw e;
+  }
 }
 
 // soloDocente: el docente consulta ÚNICAMENTE sus propios registros (las reglas
@@ -233,11 +244,13 @@ async function cargarDatosGenerales(soloDocente = '') {
   const lite = await modoLite();
   const propios = col => soloDocente ? query(collection(db, col), where('docente', '==', soloDocente)) : collection(db, col);
   const vacio = Promise.resolve({ docs: [] });
+  const denegadas = [];
   const [docs, av, asig, cal, alumnos, grupos, mats] = await Promise.all([
-    soloDocente ? vacio : safeDocs(collection(db, 'docentes')),
-    safeDocs(propios('avance')), safeDocs(propios('asignaciones')), lite ? vacio : safeDocs(propios('calificaciones')),
-    soloDocente ? vacio : safeDocs(collection(db, 'alumnos')),
-    safeDocs(collection(db, 'grupos')), safeDocs(collection(db, 'asignaturas'))
+    soloDocente ? vacio : safeDocs(collection(db, 'docentes'), 'docentes', denegadas),
+    safeDocs(propios('avance'), 'avance', denegadas), safeDocs(propios('asignaciones'), 'asignaciones', denegadas),
+    lite ? vacio : safeDocs(propios('calificaciones'), 'calificaciones', denegadas),
+    soloDocente ? vacio : safeDocs(collection(db, 'alumnos'), 'alumnos', denegadas),
+    safeDocs(collection(db, 'grupos'), 'grupos', denegadas), safeDocs(collection(db, 'asignaturas'), 'asignaturas', denegadas)
   ]);
   const docentes = docs.docs.map(x => ({id:x.id,...x.data()})).filter(x => ['docente','directivo'].includes(String(x.rol||'').toLowerCase()));
   const avances = av.docs.map(x => ({id:x.id,...x.data()}));
@@ -321,7 +334,7 @@ async function cargarDatosGenerales(soloDocente = '') {
     catch (_) { califsTotal = avances.reduce((t, a) => t + (Number(a.filas) || 0), 0); }
   }
   return {
-    lite, califsTotal, docentes, avances, asignaciones, califs, alumnos:alumnosRows, grupos:gruposRows, mats:matsRows,
+    lite, califsTotal, denegadas, docentes, avances, asignaciones, califs, alumnos:alumnosRows, grupos:gruposRows, mats:matsRows,
     cargas:[...cargasMap.values()],
     asignacionesVisibles:[...asignacionesMap.values()]
   };
@@ -421,8 +434,9 @@ async function vistaDashboard() {
     }).join('');
 
     const avisoSync = (me.rol === 'admin' && !d.lite) ? `<div class="sync-aviso"><span><b>⚡ Acelera el portal.</b> Sincroniza una sola vez las cargas antiguas y las pantallas dejarán de descargar todas las calificaciones.</span><button class="p" id="syncCargas" type="button">Sincronizar ahora</button></div>` : '';
+    const avisoPerm = (me.rol !== 'admin' && d.denegadas.length) ? `<p class="perm-nota">Sin datos de: ${esc(d.denegadas.join(', '))} (tus privilegios no incluyen esas secciones).</p>` : '';
     main.innerHTML=`<div class="section-head"><div><h2>${me.rol === 'admin' ? 'Dashboard del administrador' : 'Dashboard general'}</h2><p>Resumen ejecutivo. Los detalles se despliegan solo cuando los necesitas.</p></div></div>
-      ${avisoSync}
+      ${avisoSync}${avisoPerm}
       <div class="cards dashboard-cards">${cardHtml}</div>
       <section class="dashboard-section"><div class="section-title"><div><h3>Estado de grupos</h3><p>Haz clic en un grupo para ver docentes y materias.</p></div><span class="section-count">${gruposCargados.length} / ${d.grupos.length}</span></div>
       <div class="table-wrap"><table><thead><tr><th>Grupo</th><th>Tipo</th><th>Estado</th><th>Cargas</th><th>Docente(s)</th><th>Materia(s)</th><th>Registros</th></tr></thead><tbody>${estadoGrupos||'<tr><td colspan="7" class="empty">No hay grupos registrados.</td></tr>'}</tbody></table></div></section>`;
@@ -805,7 +819,7 @@ async function vistaTab(k) {
   const t=TABS[k];
   let q=collection(db,t.col);
   if(t.w && !['gruposES','gruposEN'].includes(k)) q=query(q,where(...t.w));
-  const ds=(await getDocs(q)).docs;
+  const ds=(await getDocs(q).catch(e=>{e.message=`[${t.col}] ${e.message}`;throw e;})).docs;
   let rows=ds.map(d=>({id:d.id,...d.data()}));
   if(k==='gruposES') rows=rows.filter(r=>String(r.tipo||'').toUpperCase()==='ESPAÑOL');
   if(k==='gruposEN') rows=rows.filter(r=>String(r.tipo||'').toUpperCase()==='INGLES');
