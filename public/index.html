@@ -12,6 +12,8 @@
   <link rel="icon" type="image/png" sizes="64x64" href="assets/favicon-64.png">
   <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
   <link rel="manifest" href="manifest.webmanifest">
+  <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+  <link rel="preconnect" href="https://firestore.googleapis.com" crossorigin>
   <link rel="stylesheet" href="styles.css">
   <title>Calificaciones IBIME</title>
 </head>
@@ -47,7 +49,7 @@
   <footer class="site-footer"><span>IBIME</span><span>•</span><span>Portal de Calificaciones</span></footer>
 
   <!-- SheetJS: permite importar .XLS/.XLSX y generar la plantilla de Alumnos. -->
-  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+  <script defer src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
   <script type="module" src="app.js"></script>
   <script>
     if ('serviceWorker' in navigator) {
