@@ -170,6 +170,7 @@ service cloud.firestore {
           canSeeGeneralData()
           || privilege('alumnos')
           || privilege('cargas')
+          || privilege('verAlumno')
         ))
         || ownAlumno(id);
 
@@ -246,6 +247,7 @@ service cloud.firestore {
           || privilege('cargas')
         ))
         || (docente() && resource.data.docente == em())
+        || (isDirectivo() && privilege('verAlumno'))
         // Panel del alumno: solo los registros con su correo institucional.
         || (dom() && resource.data.correo == em());
 
