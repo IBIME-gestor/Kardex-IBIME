@@ -1,10 +1,15 @@
-const CACHE = 'ibime-kardex-v4';
+const CACHE = 'ibime-kardex-v5';
 const APP_SHELL = [
   './',
   './index.html',
   './styles.css',
   './app.js',
   './config.js',
+  './alumnos/',
+  './alumnos/index.html',
+  './alumnos/alumno.js',
+  './alumnos/alumno.css',
+  './alumnos/manifest.webmanifest',
   './manifest.webmanifest',
   './assets/logo-ibime.png',
   './assets/favicon-64.png',
@@ -25,9 +30,11 @@ self.addEventListener('fetch', event => {
   if (url.origin !== location.origin) return;
   event.respondWith(
     caches.match(event.request).then(cached => cached || fetch(event.request).then(response => {
-      const copy = response.clone();
-      caches.open(CACHE).then(cache => cache.put(event.request, copy));
+      if (response.ok && !response.redirected) {
+        const copy = response.clone();
+        caches.open(CACHE).then(cache => cache.put(event.request, copy));
+      }
       return response;
-    }).catch(() => caches.match('./index.html')))
+    }).catch(() => caches.match(url.pathname.startsWith('/alumnos') ? './alumnos/index.html' : './index.html')))
   );
 });
