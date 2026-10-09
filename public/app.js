@@ -1,6 +1,6 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
-import { getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, query, where, writeBatch, serverTimestamp, arrayUnion } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
+import { getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, query, where, writeBatch, serverTimestamp, arrayUnion, getCountFromServer } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 import { CONFIG, BRIDGE_URL, ADMIN_EMAIL, DOMINIO } from './config.js';
 
 const app = initializeApp(CONFIG), auth = getAuth(app), db = getFirestore(app);
@@ -53,7 +53,8 @@ const TABS = {
 };
 
 $('in').onclick = () => { const p = new GoogleAuthProvider(); p.setCustomParameters({ hd: DOMINIO, prompt: 'select_account' }); signInWithPopup(auth, p).catch(e => $('err').textContent = e.message); };
-$('out').onclick = () => signOut(auth);
+$('out').onclick = () => { invalidar(); liteCache = null; signOut(auth); };
+main.addEventListener('click', e => { if (e.target.closest('#refAsig,#refCargas,#actualizarDocs,#recargar,#refMisAsig,#refMiAvance,#reintentar')) invalidar(); }, true);
 
 onAuthStateChanged(auth, async u => {
   $('out').hidden = !u; $('nav').innerHTML = '';
@@ -133,7 +134,7 @@ const bloqueo = m => { main.innerHTML = `<div id="login"><p class="msg">${esc(m)
 function menu() {
   let items;
   if (me.rol === 'admin') {
-    items = [['dashboard', 'Dashboard'], ['importar', 'Cargar reportes'], ['cargasPanel', 'Cargas'], ['asignaciones', 'Asignaciones'], ['avance', 'Avance general'], ...Object.keys(TABS).filter(k => !['asignaciones','avance'].includes(k)).map(k => [k, TABS[k].n]), ['verAlumno', 'Ver como alumno']];
+    items = [['dashboard', 'Dashboard'], ['verAlumno', 'Ver como alumno'], ['importar', 'Cargar reportes'], ['cargasPanel', 'Cargas'], ['asignaciones', 'Asignaciones'], ['avance', 'Avance general'], ...Object.keys(TABS).filter(k => !['asignaciones','avance'].includes(k)).map(k => [k, TABS[k].n])];
   } else if (me.rol === 'directivo') {
     items = [['dashboard', 'Dashboard general']];
     if (hasPriv('docentes')) items.push(['docentes', 'Docentes']);
@@ -195,6 +196,22 @@ function inferTipo(grupo, grupos) {
   return hit ? String(hit.tipo || '').toUpperCase() : '';
 }
 
+// ---------- Rendimiento ----------
+// 1) Caché en memoria: las pantallas comparten los mismos datos durante 5 min.
+//    Se invalida al guardar/borrar y con los botones "Actualizar".
+// 2) Modo ligero: una vez sincronizadas las cargas antiguas, ya no se descarga
+//    la colección completa de calificaciones; se usa `avance` (filas/alumnos).
+const CACHE_MS = 5 * 60 * 1000;
+const cacheDatos = new Map();
+let liteCache = null;
+const invalidar = () => { cacheDatos.clear(); };
+async function modoLite() {
+  if (liteCache !== null) return liteCache;
+  try { const s = await getDoc(doc(db, 'config', 'sync')); liteCache = s.exists() && s.data().avanceCompleto === true; }
+  catch (_) { liteCache = false; }
+  return liteCache;
+}
+
 // Lee una colección y, si el perfil no tiene permiso sobre ella, devuelve vacío
 // en lugar de romper toda la pantalla (cada rol ve solo lo que le corresponde).
 async function safeDocs(q) {
@@ -205,11 +222,20 @@ async function safeDocs(q) {
 // soloDocente: el docente consulta ÚNICAMENTE sus propios registros (las reglas
 // no le permiten listar colecciones completas).
 async function obtenerDatosGenerales(soloDocente = '') {
+  const hit = cacheDatos.get(soloDocente);
+  if (hit && Date.now() - hit.t < CACHE_MS) return hit.d;
+  const d = await cargarDatosGenerales(soloDocente);
+  cacheDatos.set(soloDocente, { t: Date.now(), d });
+  return d;
+}
+
+async function cargarDatosGenerales(soloDocente = '') {
+  const lite = await modoLite();
   const propios = col => soloDocente ? query(collection(db, col), where('docente', '==', soloDocente)) : collection(db, col);
   const vacio = Promise.resolve({ docs: [] });
   const [docs, av, asig, cal, alumnos, grupos, mats] = await Promise.all([
     soloDocente ? vacio : safeDocs(collection(db, 'docentes')),
-    safeDocs(propios('avance')), safeDocs(propios('asignaciones')), safeDocs(propios('calificaciones')),
+    safeDocs(propios('avance')), safeDocs(propios('asignaciones')), lite ? vacio : safeDocs(propios('calificaciones')),
     soloDocente ? vacio : safeDocs(collection(db, 'alumnos')),
     safeDocs(collection(db, 'grupos')), safeDocs(collection(db, 'asignaturas'))
   ]);
@@ -289,11 +315,61 @@ async function obtenerDatosGenerales(soloDocente = '') {
     });
   }
 
+  let califsTotal = califs.length;
+  if (lite && !soloDocente) {
+    try { califsTotal = (await getCountFromServer(collection(db, 'calificaciones'))).data().count; }
+    catch (_) { califsTotal = avances.reduce((t, a) => t + (Number(a.filas) || 0), 0); }
+  }
   return {
-    docentes, avances, asignaciones, califs, alumnos:alumnosRows, grupos:gruposRows, mats:matsRows,
+    lite, califsTotal, docentes, avances, asignaciones, califs, alumnos:alumnosRows, grupos:gruposRows, mats:matsRows,
     cargas:[...cargasMap.values()],
     asignacionesVisibles:[...asignacionesMap.values()]
   };
+}
+
+// Una sola vez: crea/actualiza en `avance` las cargas que solo existían como calificaciones
+// y activa el modo ligero para todo el portal.
+async function sincronizarCargas() {
+  if (me.rol !== 'admin') return;
+  if (!confirm('Se leerán todas las calificaciones UNA vez para completar el avance de cargas antiguas. Después el portal cargará mucho más rápido. ¿Continuar?')) return;
+  const btn = $('syncCargas'); if (btn) { btn.disabled = true; btn.textContent = 'Sincronizando…'; }
+  try {
+    const [calSnap, avSnap] = await Promise.all([getDocs(collection(db, 'calificaciones')), getDocs(collection(db, 'avance'))]);
+    const clave = (d, g, m) => `${normEmail(d)}|${normalizarCatalogo('grupos', g)}|${normalizarCatalogo('grupos', m)}`;
+    const cargas = new Map();
+    calSnap.docs.forEach(x => {
+      const r = x.data(), docente = normEmail(r.docente), grupo = recordGrupo(r), materia = recordMateria(r);
+      if (!docente || !grupo || !materia) return;
+      const k = clave(docente, grupo, materia);
+      if (!cargas.has(k)) cargas.set(k, { docente, grupo, materia, nombre: r.profesor || '', filas: 0, alumnos: new Set() });
+      const c = cargas.get(k); c.filas++; if (r.correo) c.alumnos.add(normEmail(r.correo));
+    });
+    const existentes = new Map();
+    avSnap.docs.forEach(x => { const r = x.data(); existentes.set(clave(r.docente, recordGrupo(r), r.asignatura || r.materia), { id: x.id, ...r }); });
+
+    const escrituras = [];
+    for (const [k, c] of cargas) {
+      const ex = existentes.get(k);
+      if (ex) {
+        if ((Number(ex.filas) || 0) !== c.filas || (Number(ex.alumnos) || 0) !== c.alumnos.size)
+          escrituras.push([ex.id, { filas: c.filas, alumnos: c.alumnos.size }]);
+      } else {
+        escrituras.push([hash([c.docente, c.grupo, c.materia].join('|')), normalizarGuardado({ docente: c.docente, nombre: c.nombre, grupo: c.grupo, asignatura: c.materia, filas: c.filas, alumnos: c.alumnos.size, url: '', estado: 'CARGADO', fecha: serverTimestamp() })]);
+      }
+    }
+    for (let i = 0; i < escrituras.length; i += 450) {
+      const b = writeBatch(db);
+      escrituras.slice(i, i + 450).forEach(([id, data]) => b.set(doc(db, 'avance', id), data, { merge: true }));
+      await b.commit();
+    }
+    await setDoc(doc(db, 'config', 'sync'), { avanceCompleto: true, actualizado: serverTimestamp() }, { merge: true });
+    liteCache = true; invalidar();
+    alert(`Listo. ${cargas.size} cargas revisadas, ${escrituras.length} actualizadas. El portal ahora trabaja en modo ligero.`);
+    ir('dashboard');
+  } catch (e) {
+    alert('No se pudo sincronizar: ' + (e.code || '') + ' ' + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = 'Sincronizar ahora'; }
+  }
 }
 
 function cargaTieneGrupo(c, g) {
@@ -320,7 +396,7 @@ async function vistaDashboard() {
       ['cargasPanel','Cargas',cargas.length,'Consulta y limpia cargas'],
       ['cargasPanel','Registros importados',registros,'Detalle de registros'],
       ['alumnos','Alumnos detectados',alumnosDetectados.size,'Catálogo de alumnos'],
-      ['avance','Calificaciones',d.califs.length,'Avance y resultados'],
+      ['avance','Calificaciones',d.califsTotal,'Avance y resultados'],
       ['asignaturas','Asignaturas',d.mats.length,'Catálogo de materias']
     ];
     const cardHtml=cards.filter(([go])=>canOpen(go)).map(([go,label,value,sub])=>
@@ -344,11 +420,14 @@ async function vistaDashboard() {
       </tr>`;
     }).join('');
 
+    const avisoSync = (me.rol === 'admin' && !d.lite) ? `<div class="sync-aviso"><span><b>⚡ Acelera el portal.</b> Sincroniza una sola vez las cargas antiguas y las pantallas dejarán de descargar todas las calificaciones.</span><button class="p" id="syncCargas" type="button">Sincronizar ahora</button></div>` : '';
     main.innerHTML=`<div class="section-head"><div><h2>${me.rol === 'admin' ? 'Dashboard del administrador' : 'Dashboard general'}</h2><p>Resumen ejecutivo. Los detalles se despliegan solo cuando los necesitas.</p></div></div>
+      ${avisoSync}
       <div class="cards dashboard-cards">${cardHtml}</div>
       <section class="dashboard-section"><div class="section-title"><div><h3>Estado de grupos</h3><p>Haz clic en un grupo para ver docentes y materias.</p></div><span class="section-count">${gruposCargados.length} / ${d.grupos.length}</span></div>
       <div class="table-wrap"><table><thead><tr><th>Grupo</th><th>Tipo</th><th>Estado</th><th>Cargas</th><th>Docente(s)</th><th>Materia(s)</th><th>Registros</th></tr></thead><tbody>${estadoGrupos||'<tr><td colspan="7" class="empty">No hay grupos registrados.</td></tr>'}</tbody></table></div></section>`;
     main.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>ir(b.dataset.go));
+    if ($('syncCargas')) $('syncCargas').onclick = sincronizarCargas;
     main.querySelectorAll('[data-group]').forEach(row=>row.onclick=()=>{
       const key=row.dataset.group, detail=main.querySelector(`[data-detail="${CSS.escape(key)}"]`);
       if(detail) detail.hidden=!detail.hidden;
@@ -357,9 +436,10 @@ async function vistaDashboard() {
     return;
   }
 
+  const lite = await modoLite();
   const [av, asig, cal, grupos] = await Promise.all([
     getCatalog('avance',['docente','==',me.email]), getCatalog('asignaciones',['docente','==',me.email]),
-    getCatalog('calificaciones',['docente','==',me.email]), getCatalog('grupos')
+    lite ? Promise.resolve([]) : getCatalog('calificaciones',['docente','==',me.email]), getCatalog('grupos')
   ]);
   const map=new Map();
   const add=(a)=>{const grupo=recordGrupo(a), materia=recordMateria(a);if(!grupo||!materia)return;const key=`${normalizarCatalogo('grupos',grupo)}|${normalizarCatalogo('grupos',materia)}`;map.set(key,{...map.get(key),...a,grupo,materia,tipo:recordTipo(a)||inferTipo(grupo,grupos)});};
@@ -449,6 +529,7 @@ function parsear(d, it) {
 }
 
 async function importar(){
+  invalidar();
   const log=m=>$('log').textContent+=m+'\n'; $('log').textContent=''; $('go').disabled=true;
   // Revalida el perfil antes de escribir. Evita el fallo de permisos cuando
   // la cuenta inició sesión antes de que su documento de docente existiera.
@@ -524,6 +605,7 @@ async function importar(){
 
 
 async function guardar(t, objs){
+  invalidar();
   for(let i=0;i<objs.length;i+=450){
     const b=writeBatch(db);
     objs.slice(i,i+450).forEach(raw=>{
@@ -765,7 +847,7 @@ async function vistaTab(k) {
     $('pasteArea').addEventListener('paste',()=>setTimeout(()=>{const parsed=parsearPegado(k,$('pasteArea').value);if(parsed.length)renderBulkEditor(k,parsed,rows);},50));
   }
   main.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openEditor(rows.find(r=>r.id===b.dataset.edit)));
-  main.querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{if(!confirm('¿Borrar este registro?'))return;try{await deleteDoc(doc(db,t.col,b.dataset.del));vistaTab(k);}catch(e){alert('No se pudo borrar: '+e.message);}});
+  main.querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{if(!confirm('¿Borrar este registro?'))return;invalidar();try{await deleteDoc(doc(db,t.col,b.dataset.del));vistaTab(k);}catch(e){alert('No se pudo borrar: '+e.message);}});
   $('recargar').onclick=()=>vistaTab(k);
   $('buscar').oninput=e=>{const term=e.target.value.toLowerCase();main.querySelectorAll('tbody tr').forEach(tr=>{tr.hidden=!tr.textContent.toLowerCase().includes(term);});};
   soloLectura();
@@ -782,10 +864,9 @@ function soloLectura() {
 }
 
 async function vistaDocentesPanel(){
-  const ds=(await getDocs(collection(db,'docentes'))).docs.map(d=>({id:d.id,...d.data()}))
-    .filter(d=>['docente','directivo'].includes(String(d.rol||'').toLowerCase()))
-    .sort((a,b)=>sortText(a.nombre||a.correo,b.nombre||b.correo));
-  let cargas=[]; try { cargas=(await obtenerDatosGenerales()).cargas; } catch(_) {}
+  const dat=await obtenerDatosGenerales();
+  const ds=[...dat.docentes].sort((a,b)=>sortText(a.nombre||a.correo,b.nombre||b.correo));
+  const cargas=dat.cargas;
 
   const rows=ds.map(d=>{
     const mine=cargas.filter(c=>normEmail(c.docente)===normEmail(d.correo)).sort((a,b)=>sortText(a.grupo,b.grupo)||sortText(a.materia,b.materia));
@@ -823,6 +904,7 @@ async function vistaDocentesPanel(){
     if(id.toLowerCase()===ADMIN_EMAIL.toLowerCase()) return alert('No puedes bloquear al administrador principal.');
     const bloquear=data.bloqueado!==true;
     if(!confirm(`¿${bloquear?'Bloquear':'desbloquear'} el acceso de ${data.nombre||id}?`)) return;
+    invalidar();
     try{await setDoc(doc(db,'docentes',id),{bloqueado:bloquear,actualizado:serverTimestamp()},{merge:true});vistaDocentesPanel();}catch(e){alert('No se pudo cambiar el acceso: '+e.message);}
   });
   main.querySelectorAll('[data-delete-doc]').forEach(b=>b.onclick=async()=>{
@@ -830,6 +912,7 @@ async function vistaDocentesPanel(){
     if(id.toLowerCase()===ADMIN_EMAIL.toLowerCase()) return alert('No puedes eliminar al administrador principal.');
     const snap=await getDoc(doc(db,'docentes',id)), data=snap.data()||{};
     if(!confirm(`¿Eliminar el perfil de ${data.nombre||id}? Esto no elimina sus reportes académicos.`)) return;
+    invalidar();
     try{await deleteDoc(doc(db,'docentes',id));vistaDocentesPanel();}catch(e){alert('No se pudo eliminar: '+e.message);}
   });
   soloLectura();
@@ -859,6 +942,7 @@ async function editarDocente(correo){
     const priv=seleccionados;
     if(!em || !em.endsWith('@'+DOMINIO)) return alert('Usa un correo @ibime.edu.mx.');
     if(rol==='directivo' && !priv.length) return alert('Selecciona al menos un privilegio para el directivo.');
+    invalidar();
     try{ await setDoc(doc(db,'docentes',em),normalizarGuardado({correo:em,nombre:$('edNombre').value.trim(),foto:$('edFoto').value.trim(),rol,permisos:rol==='admin'?allPrivs():priv,bloqueado:isAdmin?false:$('edBloqueado').checked,actualizado:serverTimestamp()}),{merge:true}); alert('Perfil actualizado.'); vistaDocentesPanel(); }catch(e){alert('No se pudo guardar: '+e.message);}
   };
 }
@@ -884,6 +968,7 @@ async function vistaCargasPanel(filtroDocente=''){
 }
 
 async function borrarCargaCompleta(c){
+  invalidar();
   const keyDoc=normEmail(c.docente), keyGrupo=normalizarCatalogo('grupos',c.grupo), keyMateria=normalizarCatalogo('grupos',c.materia);
   const [calSnap,asigSnap,avSnap]=await Promise.all([
     getDocs(collection(db,'calificaciones')),getDocs(collection(db,'asignaciones')),getDocs(collection(db,'avance'))
