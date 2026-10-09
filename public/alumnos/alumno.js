@@ -1,146 +1,316 @@
-/* Panel del alumno — usa la paleta y componentes de /styles.css */
-:root{
-  --amarillo:#a96b0b; --amarillo-bg:#fff6dc; --amarillo-bd:#f2d98a;
-  --rojo:#c93648;     --rojo-bg:#fff1f2;     --rojo-bd:#ffd4d9;
-  --ok:#14805b;       --ok-bg:#eaf8f2;
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
+import { getFirestore, collection, doc, getDoc, getDocs, query, where } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
+import { CONFIG, DOMINIO } from '../config.js';
+
+const app = initializeApp(CONFIG), auth = getAuth(app), db = getFirestore(app);
+const $ = id => document.getElementById(id), main = $('main');
+const LOGIN_HTML = main.innerHTML;
+
+// <helpers>
+// Umbrales de color (una cifra decimal): 5.9 o menos = rojo, 7.9 o menos = amarillo.
+const TOPE_ROJO = 5.9, TOPE_AMARILLO = 7.9;
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const normEmail = v => String(v || '').trim().toLowerCase();
+const normTxt = v => String(v ?? '').trim().replace(/\s+/g, ' ').toUpperCase();
+const sortText = (a, b) => String(a ?? '').localeCompare(String(b ?? ''), 'es', { numeric: true, sensitivity: 'base' });
+
+const nivel = n => { const r = Math.round(Number(n) * 10) / 10; return r <= TOPE_ROJO ? 'rojo' : r <= TOPE_AMARILLO ? 'amarillo' : 'ok'; };
+const fmtNota = n => (Math.round(Number(n) * 10) / 10).toFixed(1);
+
+const SMALL = new Set(['de', 'del', 'la', 'las', 'el', 'los', 'y', 'e', 'en', 'a', 'al', 'o', 'u', 'con', 'para', 'por', 'un', 'una']);
+const ROMAN = /^(i{1,3}|iv|v|vi{1,3}|ix|x)$/i;
+function titleCase(s, { roman = true } = {}) {
+  const str = String(s ?? '').trim(); if (!str) return '';
+  if (str !== str.toUpperCase() && str !== str.toLowerCase()) return str; // ya trae formato mixto
+  let first = true;
+  return str.toLowerCase().split(/(\s+|-)/).map(w => {
+    if (!w || /^\s+$|^-$/.test(w)) return w;
+    const isFirst = first; first = false;
+    if (roman && ROMAN.test(w)) return w.toUpperCase();
+    if (!isFirst && SMALL.has(w)) return w;
+    return w.charAt(0).toUpperCase() + w.slice(1);
+  }).join('');
+}
+const iniciales = n => String(n || '?').trim().split(/\s+/).filter(Boolean).slice(0, 2).map(p => p[0]).join('').toUpperCase() || '?';
+
+const MESES = { ene: 0, feb: 1, mar: 2, abr: 3, may: 4, jun: 5, jul: 6, ago: 7, sep: 8, set: 8, oct: 9, nov: 10, dic: 11, jan: 0, apr: 3, aug: 7, dec: 11 };
+function parseFecha(txt) {
+  const s = String(txt || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+  if (!s) return null;
+  let m;
+  if ((m = s.match(/(\d{4})-(\d{1,2})-(\d{1,2})/))) return Date.UTC(+m[1], +m[2] - 1, +m[3]);
+  if ((m = s.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/))) { let y = +m[3]; if (y < 100) y += 2000; return Date.UTC(y, +m[2] - 1, +m[1]); }
+  const mes = (s.match(/[a-z]{3,}/g) || []).map(w => MESES[w.slice(0, 3)]).find(v => v !== undefined);
+  const dia = s.match(/\b(\d{1,2})\b/), anio = s.match(/\b(20\d{2})\b/);
+  if (mes !== undefined && dia) {
+    let y = anio ? +anio[1] : new Date().getFullYear();
+    if (!anio && Date.UTC(y, mes, +dia[1]) > Date.now() + 60 * 864e5) y--; // sin año: asume el más reciente
+    return Date.UTC(y, mes, +dia[1]);
+  }
+  return null;
+}
+const fmtFecha = (txt, ts) => ts != null
+  ? new Date(ts).toLocaleDateString('es-MX', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }).replace('.', '')
+  : titleCase(txt, { roman: false });
+
+const gmail = (to, asunto, cuerpo, cuenta) =>
+  `https://mail.google.com/mail/?view=cm&fs=1&authuser=${encodeURIComponent(cuenta)}&to=${encodeURIComponent(to)}&su=${encodeURIComponent(asunto)}&body=${encodeURIComponent(cuerpo)}`;
+// </helpers>
+
+let estado = null; // { user, email, perfil, materias, filtro, abiertas }
+let avisoLogin = '';
+
+/* ============================== ACCESO ============================== */
+main.addEventListener('click', e => {
+  if (e.target.closest('#in')) return iniciarSesion();
+  const head = e.target.closest('.mat-head');
+  if (head) return alternar(head);
+  const chip = e.target.closest('[data-f]');
+  if (chip && estado) { estado.filtro = chip.dataset.f; pintarControles(); pintarLista(); }
+});
+$('out').onclick = () => signOut(auth);
+
+// Si una foto de Google no carga, se sustituye por las iniciales.
+document.addEventListener('error', e => {
+  const img = e.target;
+  if (!(img instanceof HTMLImageElement) || !img.classList.contains('av')) return;
+  const ph = document.createElement('span');
+  ph.className = img.className + ' ph'; ph.textContent = img.dataset.ini || '?';
+  img.replaceWith(ph);
+}, true);
+
+function iniciarSesion() {
+  const p = new GoogleAuthProvider();
+  p.setCustomParameters({ hd: DOMINIO, prompt: 'select_account' });
+  signInWithPopup(auth, p).catch(e => {
+    if (e.code === 'auth/popup-closed-by-user' || e.code === 'auth/cancelled-popup-request') return;
+    mostrarErrorLogin(e.message);
+  });
+}
+function mostrarErrorLogin(m) { const el = $('err'); if (el) { el.textContent = m; el.hidden = false; } }
+function pintarLogin() {
+  main.innerHTML = LOGIN_HTML; estado = null;
+  if (avisoLogin) { mostrarErrorLogin(avisoLogin); avisoLogin = ''; }
 }
 
-/* ---------- Avatares ---------- */
-.av{display:block;border-radius:50%;object-fit:cover;flex:none;border:2px solid #dce8f2;background:#edf3f8}
-.av.ph{display:grid;place-items:center;color:var(--brand);font-weight:900;background:linear-gradient(135deg,#e3eef7,#f4f8fb)}
-.av-xl{width:84px;height:84px;font-size:28px;border-width:3px}
-.av-lg{width:58px;height:58px;font-size:19px}
+onAuthStateChanged(auth, async u => {
+  $('out').hidden = !u;
+  if (!u) return pintarLogin();
+  const email = normEmail(u.email);
+  if (!email.endsWith('@' + DOMINIO) || u.emailVerified === false) {
+    avisoLogin = `Solo puedes entrar con tu correo institucional @${DOMINIO}.`;
+    return signOut(auth);
+  }
+  main.innerHTML = '<div class="al-card al-loading"><div class="spin" aria-hidden="true"></div><p>Cargando tus calificaciones…</p></div>';
+  try {
+    await u.getIdToken(true);
+    estado = await cargar(u, email);
+    pintar();
+  } catch (e) {
+    console.error('Panel alumno', e);
+    main.innerHTML = `<div class="al-card al-error"><h3>No se pudo cargar tu información</h3>
+      <p>${esc(e.code || '')} ${esc(e.message || '')}</p>
+      <button id="reintentar" class="p" type="button">Reintentar</button></div>`;
+    $('reintentar').onclick = () => location.reload();
+  }
+});
 
-/* ---------- Perfil ---------- */
-.al-perfil{
-  display:flex;align-items:center;gap:20px;flex-wrap:wrap;
-  background:rgba(255,255,255,.98);padding:22px 24px;border-radius:22px;
-  border:1px solid var(--border);box-shadow:var(--shadow);
-}
-.al-perfil-info{flex:1 1 220px;min-width:0}
-.al-perfil-info .eyebrow{margin:0 0 4px}
-.al-perfil-info h2{margin:0;color:var(--brand);font-size:25px;letter-spacing:-.6px;line-height:1.15}
-.al-perfil-info p{margin:5px 0 0;color:var(--muted);font-size:13px;overflow-wrap:anywhere}
-.al-datos{display:flex;gap:10px;flex-wrap:wrap;flex:1 1 360px;justify-content:flex-end}
-.al-dato{background:var(--surface-2);border:1px solid #dbe8f1;border-radius:14px;padding:10px 15px;min-width:130px}
-.al-dato small{display:block;color:var(--muted);font-size:10.5px;font-weight:800;letter-spacing:.6px;text-transform:uppercase}
-.al-dato b{display:block;margin-top:3px;color:var(--brand);font-size:15px}
+/* ============================== DATOS ============================== */
+async function cargar(u, email) {
+  const [alSnap, calSnap] = await Promise.all([
+    getDoc(doc(db, 'alumnos', email)).catch(() => null),
+    getDocs(query(collection(db, 'calificaciones'), where('correo', '==', email)))
+  ]);
+  const al = alSnap && alSnap.exists() ? alSnap.data() : {};
+  const filas = calSnap.docs.map(d => d.data()).filter(r => r.asignatura || r.materia);
 
-/* ---------- Resumen ---------- */
-.al-stats{margin-top:18px}
-.al-stats b.n-rojo{color:var(--rojo)}
-.al-stats b.n-amarillo{color:var(--amarillo)}
-.al-stats b.n-ok{color:var(--ok)}
+  const nombre = titleCase(al.nombre || filas.find(r => r.alumno)?.alumno || u.displayName || email.split('@')[0], { roman: false });
+  const perfil = {
+    nombre, email, foto: u.photoURL || '',
+    matricula: String(al.matricula || '').trim(),
+    grupoEs: String(al.grupoEspanol || '').trim(),
+    grupoEn: String(al.grupoIngles || '').trim(),
+    tutor: titleCase(al.tutor || '', { roman: false })
+  };
 
-/* ---------- Tarjetas genéricas ---------- */
-.al-card{background:var(--surface);border:1px solid var(--border);border-radius:18px;box-shadow:var(--shadow-sm);padding:28px;text-align:center;color:var(--muted)}
-.al-card h3{margin:0 0 8px;color:var(--brand)}
-.al-card p{margin:0;line-height:1.55}
-.al-loading{display:grid;place-items:center;gap:14px;padding:46px 20px;margin-top:8vh}
-.spin{width:34px;height:34px;border-radius:50%;border:3px solid #dce8f2;border-top-color:var(--brand-2);animation:giro .8s linear infinite}
-@keyframes giro{to{transform:rotate(360deg)}}
-.al-error{margin-top:8vh}
-.al-error button{margin-top:16px}
+  // Docentes (nombre y foto) — un solo documento por docente.
+  const correosDoc = [...new Set(filas.map(r => normEmail(r.docente)).filter(Boolean))];
+  const docentes = {};
+  await Promise.all(correosDoc.map(async c => {
+    try { const s = await getDoc(doc(db, 'docentes', c)); if (s.exists()) docentes[c] = s.data(); } catch (_) { /* se usa el nombre de la calificación */ }
+  }));
 
-/* ---------- Controles ---------- */
-.al-controles{display:flex;justify-content:space-between;align-items:center;gap:12px 20px;flex-wrap:wrap;margin:6px 0 14px}
-.al-chips{display:flex;gap:8px;flex-wrap:wrap}
-.al-chip{background:#fff;border-color:#d9e6ee;color:var(--brand);font-size:12.5px;padding:8px 14px;border-radius:999px}
-.al-chip.on{background:var(--brand);color:#fff;border-color:var(--brand);box-shadow:0 6px 18px rgba(7,52,92,.18)}
-.al-leyenda{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;font-weight:700;color:var(--muted)}
-.al-leyenda span{display:inline-flex;align-items:center;gap:6px}
-.dot{width:11px;height:11px;border-radius:50%;display:inline-block}
-.d-amarillo{background:#f0b429}.d-rojo{background:var(--rojo)}
+  // Un cajón por MATERIA + GRUPO + DOCENTE.
+  const mapa = new Map();
+  for (const r of filas) {
+    const materia = String(r.asignatura || r.materia).trim(), grupo = String(r.grupo || '').trim(), dc = normEmail(r.docente);
+    const key = [normTxt(materia), normTxt(grupo), dc].join('|');
+    if (!mapa.has(key)) mapa.set(key, { key, materia, grupo, docente: dc, profesor: r.profesor, filas: [] });
+    const n = Number(r.calif);
+    const ts = parseFecha(r.fecha);
+    mapa.get(key).filas.push({ actividad: r.actividad, fecha: r.fecha, ts, calif: Number.isFinite(n) ? n : 0 });
+  }
 
-/* ---------- Secciones y cajones de materia ---------- */
-.al-seccion{margin-bottom:10px}
-.al-sec-titulo{margin:20px 2px 10px;color:var(--brand);font-size:13px;letter-spacing:1.2px;text-transform:uppercase}
+  const gEs = normTxt(perfil.grupoEs), gEn = normTxt(perfil.grupoEn);
+  const materias = [...mapa.values()].map(m => {
+    const info = docentes[m.docente] || {};
+    m.nombre = titleCase(m.materia);
+    m.tipo = normTxt(m.grupo) && normTxt(m.grupo) === gEs ? 'ES' : normTxt(m.grupo) && normTxt(m.grupo) === gEn ? 'EN' : '';
+    m.docNombre = titleCase(info.nombre || m.profesor || m.docente || 'Docente', { roman: false });
+    m.docFoto = info.foto || '';
+    m.filas.sort((a, b) => (a.ts != null && b.ts != null) ? (b.ts - a.ts) : sortText(a.actividad, b.actividad));
+    m.prom = m.filas.reduce((s, f) => s + f.calif, 0) / m.filas.length;
+    m.rojas = m.filas.filter(f => nivel(f.calif) === 'rojo').length;
+    m.amarillas = m.filas.filter(f => nivel(f.calif) === 'amarillo').length;
+    return m;
+  }).sort((a, b) => sortText(a.nombre, b.nombre));
+  materias.forEach((m, i) => { m.id = 'mat-' + i; });
 
-.mat{background:var(--surface);border:1px solid var(--border);border-left:5px solid #cfdde8;border-radius:16px;box-shadow:var(--shadow-sm);margin-bottom:12px;overflow:hidden}
-.mat.n-borde-ok{border-left-color:var(--ok)}
-.mat.n-borde-amarillo{border-left-color:#f0b429}
-.mat.n-borde-rojo{border-left-color:var(--rojo)}
-
-.mat-head{
-  width:100%;display:flex;align-items:center;gap:14px;text-align:left;
-  background:transparent;border:0;border-radius:0;padding:16px 18px;color:var(--text);box-shadow:none;
-}
-.mat-head:hover{transform:none;box-shadow:none;background:#f8fbfd}
-.mat-ico{width:38px;height:38px;border-radius:11px;display:grid;place-items:center;flex:none;background:var(--surface-2);color:var(--brand-2);font-size:12px;font-weight:900;letter-spacing:.5px}
-.mat-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
-.mat-info strong{color:var(--brand);font-size:16px;line-height:1.2;overflow-wrap:anywhere}
-.mat-info small{color:var(--muted);font-size:12px;font-weight:600}
-.mat-flags{display:flex;gap:6px;flex:none}
-.flag{min-width:24px;height:24px;padding:0 7px;border-radius:999px;display:grid;place-items:center;font-size:12px;font-weight:900}
-.f-rojo{background:var(--rojo-bg);color:var(--rojo);border:1px solid var(--rojo-bd)}
-.f-amarillo{background:var(--amarillo-bg);color:var(--amarillo);border:1px solid var(--amarillo-bd)}
-.mat-prom{display:flex;flex-direction:column;align-items:center;gap:3px;flex:none}
-.mat-prom small{font-size:9.5px;color:var(--muted);font-weight:800;letter-spacing:.6px;text-transform:uppercase}
-.chev{color:var(--brand-2);font-size:18px;transition:transform .2s ease;flex:none}
-.mat-head[aria-expanded="true"] .chev{transform:rotate(180deg)}
-
-/* ---------- Calificación (pill) ---------- */
-.pill{display:inline-block;min-width:54px;text-align:center;padding:6px 10px;border-radius:10px;font-size:15px;font-weight:900;letter-spacing:-.2px;border:1px solid transparent}
-.p-ok{background:var(--ok-bg);color:var(--ok);border-color:#c8ebdc}
-.p-amarillo{background:var(--amarillo-bg);color:var(--amarillo);border-color:var(--amarillo-bd)}
-.p-rojo{background:var(--rojo-bg);color:var(--rojo);border-color:var(--rojo-bd)}
-
-/* ---------- Detalle ---------- */
-.mat-body{padding:4px 18px 18px;border-top:1px solid var(--border);background:#fbfdfe}
-.mat-body[hidden]{display:none}
-
-.doc-card{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:16px 0}
-.doc-info{flex:1 1 200px;min-width:0;display:flex;flex-direction:column;gap:2px}
-.doc-info small{font-size:10.5px;font-weight:800;color:var(--muted);letter-spacing:.7px;text-transform:uppercase}
-.doc-info strong{color:var(--brand);font-size:16px}
-.doc-info span{font-size:12.5px;color:var(--muted);overflow-wrap:anywhere}
-.btn-aclaracion{
-  display:inline-flex;align-items:center;gap:8px;padding:11px 18px;border-radius:12px;
-  background:linear-gradient(135deg,#07345c,#0c70a6);color:#fff;font-weight:800;font-size:13.5px;
-  box-shadow:0 7px 18px rgba(7,52,92,.2);text-decoration:none;white-space:nowrap
-}
-.btn-aclaracion:hover{text-decoration:none;transform:translateY(-1px);box-shadow:0 10px 22px rgba(7,52,92,.28)}
-
-.act-cab,.act{display:grid;grid-template-columns:minmax(0,1fr) 110px 74px 74px;gap:12px;align-items:center}
-.act-cab{padding:0 14px 8px;font-size:10.5px;font-weight:800;color:var(--muted);letter-spacing:.6px;text-transform:uppercase}
-.act-cab span:nth-child(3){text-align:center}
-.act-lista{list-style:none;margin:0;padding:0;display:grid;gap:7px}
-.act{padding:10px 14px;border-radius:12px;background:#fff;border:1px solid var(--border);border-left:4px solid transparent}
-.act.n-fila-amarillo{background:var(--amarillo-bg);border-color:var(--amarillo-bd);border-left-color:#f0b429}
-.act.n-fila-rojo{background:var(--rojo-bg);border-color:var(--rojo-bd);border-left-color:var(--rojo)}
-.act-nombre{font-weight:700;color:var(--text);overflow-wrap:anywhere;font-size:14px}
-.act-fecha{font-size:12.5px;color:var(--muted);font-weight:600}
-.act .pill{justify-self:center;min-width:50px;padding:5px 8px}
-.act-aclarar{justify-self:end;font-size:12px;font-weight:800;color:var(--brand-2);padding:5px 9px;border-radius:9px;border:1px solid #cfe0ec;background:#fff}
-.act-aclarar:hover{text-decoration:none;background:var(--brand);color:#fff;border-color:var(--brand)}
-
-/* ---------- Encabezado (sesión iniciada) ---------- */
-body:not(:has(#login)) .brand-copy strong{color:var(--brand)}
-
-/* ---------- Responsive ---------- */
-@media(max-width:760px){
-  .al-datos{justify-content:flex-start}
-  .al-dato{flex:1 1 130px}
-  .al-perfil{padding:18px}
-  .av-xl{width:68px;height:68px;font-size:23px}
-  .al-perfil-info h2{font-size:21px}
-  .mat-head{padding:14px;gap:10px;flex-wrap:wrap}
-  .mat-info{flex:1 1 calc(100% - 140px)}
-  .mat-flags{order:5}
-  .mat-body{padding:2px 12px 14px}
-  .btn-aclaracion{width:100%;justify-content:center}
-  .act-cab{display:none}
-  .act{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"n p" "f a";gap:6px 10px}
-  .act-nombre{grid-area:n}.act .pill{grid-area:p}.act-fecha{grid-area:f}.act-aclarar,.act>span:last-child{grid-area:a}
-}
-@media(max-width:460px){
-  .mat-prom small{display:none}
-  .al-leyenda{gap:8px 14px}
+  return { user: u, email, perfil, materias, filtro: 'todas', abiertas: new Set() };
 }
 
-@media(max-width:700px){
-  .cards.al-stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
-  .cards.al-stats>div{padding:14px}
-  .cards.al-stats b{font-size:25px}
-  .cards.al-stats span{font-size:12px}
+/* ============================== VISTA ============================== */
+const avatar = (foto, nombre, clase) => foto
+  ? `<img class="av ${clase}" src="${esc(foto)}" alt="" referrerpolicy="no-referrer" data-ini="${esc(iniciales(nombre))}">`
+  : `<span class="av ${clase} ph">${esc(iniciales(nombre))}</span>`;
+
+function pintar() {
+  const { perfil, materias } = estado;
+  const proms = materias.map(m => m.prom);
+  const general = proms.length ? proms.reduce((a, b) => a + b, 0) / proms.length : null;
+  const rojas = materias.reduce((s, m) => s + m.rojas, 0), amarillas = materias.reduce((s, m) => s + m.amarillas, 0);
+
+  const dato = (et, v) => v ? `<div class="al-dato"><small>${et}</small><b>${esc(v)}</b></div>` : '';
+  main.innerHTML = `
+    <section class="al-perfil">
+      ${avatar(perfil.foto, perfil.nombre, 'av-xl')}
+      <div class="al-perfil-info">
+        <span class="eyebrow">ALUMNO</span>
+        <h2>${esc(perfil.nombre)}</h2>
+        <p>${esc(perfil.email)}</p>
+      </div>
+      <div class="al-datos">
+        ${dato('Matrícula', perfil.matricula)}
+        ${dato('Grupo español', perfil.grupoEs || 'Sin registrar')}
+        ${dato('Grupo inglés', perfil.grupoEn || 'Sin registrar')}
+        ${dato('Tutor', perfil.tutor)}
+      </div>
+    </section>
+
+    <div class="cards al-stats">
+      <div><b>${materias.length}</b><span>Materias</span></div>
+      <div><b class="${general == null ? '' : 'n-' + nivel(general)}">${general == null ? '—' : fmtNota(general)}</b><span>Promedio general</span></div>
+      <div><b class="n-amarillo">${amarillas}</b><span>Actividades por mejorar</span></div>
+      <div><b class="n-rojo">${rojas}</b><span>Atención prioritaria</span></div>
+    </div>
+
+    ${materias.length ? `
+      <div class="al-controles" id="controles"></div>
+      <div id="lista"></div>` : `
+      <div class="al-card al-vacio">
+        <h3>Aún no hay calificaciones registradas</h3>
+        <p>No encontramos calificaciones ligadas a <strong>${esc(perfil.email)}</strong>. Aparecerán aquí en cuanto tus docentes carguen sus reportes.</p>
+      </div>`}`;
+  if (materias.length) { pintarControles(); pintarLista(); }
+}
+
+function pintarControles() {
+  const { materias, filtro } = estado;
+  const hay = t => materias.some(m => m.tipo === t);
+  const chips = [['todas', 'Todas']];
+  if (hay('ES')) chips.push(['ES', 'Español']);
+  if (hay('EN')) chips.push(['EN', 'Inglés']);
+  if (materias.some(m => m.rojas || m.amarillas)) chips.push(['alerta', 'Áreas de oportunidad']);
+  $('controles').innerHTML = `
+    <div class="al-chips" role="group" aria-label="Filtrar materias">
+      ${chips.map(([k, n]) => `<button type="button" class="al-chip ${filtro === k ? 'on' : ''}" data-f="${k}" aria-pressed="${filtro === k}">${n}</button>`).join('')}
+    </div>
+    <div class="al-leyenda" aria-label="Significado de los colores">
+      <span><i class="dot d-amarillo"></i>6.0 a 7.9 · Por mejorar</span>
+      <span><i class="dot d-rojo"></i>5.9 o menos · Atención prioritaria</span>
+    </div>`;
+}
+
+function pintarLista() {
+  const { materias, filtro } = estado;
+  const visibles = materias.filter(m => filtro === 'todas' || (filtro === 'alerta' ? (m.rojas || m.amarillas) : m.tipo === filtro));
+  if (!visibles.length) { $('lista').innerHTML = '<div class="al-card al-vacio"><p>No hay materias para este filtro.</p></div>'; return; }
+  const secciones = [['ES', 'Español'], ['EN', 'Inglés'], ['', 'Otras materias']];
+  $('lista').innerHTML = secciones.map(([t, titulo]) => {
+    const ms = visibles.filter(m => m.tipo === t); if (!ms.length) return '';
+    const mostrarTitulo = visibles.some(m => m.tipo !== t) || t === '';
+    return `<section class="al-seccion">${mostrarTitulo ? `<h3 class="al-sec-titulo">${titulo}</h3>` : ''}${ms.map(tarjeta).join('')}</section>`;
+  }).join('');
+}
+
+function tarjeta(m) {
+  const abierta = estado.abiertas.has(m.key), id = m.id;
+  const nv = nivel(m.prom);
+  return `
+  <article class="mat n-borde-${nv}" data-k="${esc(m.key)}">
+    <button type="button" class="mat-head" aria-expanded="${abierta}" aria-controls="${id}">
+      <span class="mat-ico">${m.tipo || '•'}</span>
+      <span class="mat-info">
+        <strong>${esc(m.nombre)}</strong>
+        <small>${esc(m.grupo ? m.grupo + ' · ' : '')}${esc(m.docNombre)}</small>
+      </span>
+      <span class="mat-flags">
+        ${m.rojas ? `<span class="flag f-rojo" title="${m.rojas} actividad(es) en atención prioritaria">${m.rojas}</span>` : ''}
+        ${m.amarillas ? `<span class="flag f-amarillo" title="${m.amarillas} actividad(es) por mejorar">${m.amarillas}</span>` : ''}
+      </span>
+      <span class="mat-prom" title="Promedio de la materia"><small>Promedio</small><b class="pill p-${nv}">${fmtNota(m.prom)}</b></span>
+      <span class="chev" aria-hidden="true">▾</span>
+    </button>
+    <div class="mat-body" id="${id}" ${abierta ? '' : 'hidden'}>${cuerpo(m)}</div>
+  </article>`;
+}
+
+function saludo(m) { return `Estimado(a) profesor(a) ${m.docNombre}:\n\n`; }
+function firma() {
+  const p = estado.perfil;
+  return `Soy ${p.nombre}${p.matricula ? ', matrícula ' + p.matricula : ''}${p.grupoEs || p.grupoEn ? ' (' + [p.grupoEs && 'grupo español ' + p.grupoEs, p.grupoEn && 'grupo inglés ' + p.grupoEn].filter(Boolean).join(', ') + ')' : ''}.`;
+}
+function linkMateria(m) {
+  const marcadas = m.filas.filter(f => nivel(f.calif) !== 'ok').slice(0, 12);
+  const lista = marcadas.length
+    ? '\n\nActividades que me gustaría revisar:\n' + marcadas.map(f => `• ${titleCase(f.actividad, { roman: false }) || 'Actividad'} (${fmtFecha(f.fecha, f.ts) || 's/f'}): ${fmtNota(f.calif)}`).join('\n')
+    : '';
+  const cuerpo = `${saludo(m)}${firma()} Le escribo para solicitar una aclaración sobre mis calificaciones de la materia ${m.nombre}.${lista}\n\nQuedo atento(a) a su respuesta. Muchas gracias.\n`;
+  return gmail(m.docente, `Solicitud de aclaración · ${m.nombre}`, cuerpo, estado.email);
+}
+function linkActividad(m, f) {
+  const cuerpo = `${saludo(m)}${firma()} Le escribo para solicitar una aclaración sobre una calificación de la materia ${m.nombre}:\n\n• Actividad: ${titleCase(f.actividad, { roman: false }) || 'Sin nombre'}\n• Fecha: ${fmtFecha(f.fecha, f.ts) || 'Sin fecha'}\n• Calificación registrada: ${fmtNota(f.calif)}\n\nQuedo atento(a) a su respuesta. Muchas gracias.\n`;
+  return gmail(m.docente, `Aclaración de calificación · ${m.nombre}`, cuerpo, estado.email);
+}
+
+function cuerpo(m) {
+  const filas = m.filas.map(f => {
+    const nv = nivel(f.calif);
+    return `<li class="act n-fila-${nv}">
+      <span class="act-nombre">${esc(titleCase(f.actividad, { roman: false }) || 'Actividad sin nombre')}</span>
+      <span class="act-fecha">${esc(fmtFecha(f.fecha, f.ts) || 'Sin fecha')}</span>
+      <b class="pill p-${nv}">${fmtNota(f.calif)}</b>
+      ${m.docente && nv !== 'ok' ? `<a class="act-aclarar" href="${esc(linkActividad(m, f))}" target="_blank" rel="noopener">Aclarar</a>` : '<span></span>'}
+    </li>`;
+  }).join('');
+  return `
+    <div class="doc-card">
+      ${avatar(m.docFoto, m.docNombre, 'av-lg')}
+      <div class="doc-info">
+        <small>Docente</small>
+        <strong>${esc(m.docNombre)}</strong>
+        <span>${esc(m.docente)}</span>
+      </div>
+      ${m.docente ? `<a class="btn-aclaracion" href="${esc(linkMateria(m))}" target="_blank" rel="noopener">✉ Solicitar aclaración</a>` : ''}
+    </div>
+    <div class="act-cab"><span>Actividad</span><span>Fecha</span><span>Calificación</span><span></span></div>
+    <ul class="act-lista">${filas}</ul>`;
+}
+
+function alternar(head) {
+  const art = head.closest('.mat'), body = art.querySelector('.mat-body'), abrir = body.hidden;
+  body.hidden = !abrir; head.setAttribute('aria-expanded', String(abrir));
+  abrir ? estado.abiertas.add(art.dataset.k) : estado.abiertas.delete(art.dataset.k);
 }
