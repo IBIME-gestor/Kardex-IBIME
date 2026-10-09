@@ -84,6 +84,9 @@ onAuthStateChanged(auth, async u => {
       me = { email, nombre: perfil.nombre, foto: perfil.foto, rol: 'admin' };
     } else {
       if (!d.exists()) {
+        // Un alumno registrado nunca se autoalta como docente: va a su propio panel.
+        const esAlumno = await getDoc(doc(db, 'alumnos', email)).then(x => x.exists()).catch(() => false);
+        if (esAlumno) { location.replace('/alumnos/'); return; }
         const perfil = {
           correo: email,
           nombre: u.displayName || email.split('@')[0],
