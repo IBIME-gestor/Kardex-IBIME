@@ -204,6 +204,7 @@ nav button[data-k="asignaciones"]:before{content:"⇄"}
 nav button[data-k="avance"]:before{content:"◔"}
 nav button[data-k="misAsignaciones"]:before{content:"⇄"}
 nav button[data-k="miAvance"]:before{content:"◔"}
+nav button[data-k="verAlumno"]:before{content:"◉"}
 
 nav button:before{
   display:inline-block;
