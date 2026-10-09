@@ -33,40 +33,50 @@ service cloud.firestore {
 
     function activeProfile() {
       return hasProfile()
-        && (!('bloqueado' in profile()) || profile().bloqueado != true);
+        && profile().get('bloqueado', false) != true;
     }
 
     function admin() {
       return isAdminEmail()
         || (activeProfile()
-          && profile().rol is string
-          && profile().rol.lower() == 'admin');
+          && profile().get('rol', '') is string
+          && profile().get('rol', '').lower() == 'admin');
     }
 
     function isDirectivo() {
       return activeProfile()
-        && profile().rol is string
-        && profile().rol.lower() == 'directivo';
+        && profile().get('rol', '') is string
+        && profile().get('rol', '').lower() == 'directivo';
     }
 
     // El admin conserva las capacidades completas. Los docentes pueden
     // consultar los datos académicos necesarios para su propio panel y carga.
     function docente() {
       return activeProfile()
-        && profile().rol is string
-        && profile().rol.lower() in ['docente', 'admin'];
+        && profile().get('rol', '') is string
+        && profile().get('rol', '').lower() in ['docente', 'admin'];
     }
 
-    // Soporta tanto "permisos" (actual) como "privilegios" (compatibilidad
-    // con perfiles anteriores). Un directivo nunca obtiene escritura por
-    // tener un privilegio: los privilegios son exclusivamente de lectura.
+    // Lista unificada de privilegios del directivo. Soporta "permisos" (actual) y
+    // "privilegios" (compatibilidad). Usa .get(campo, default): si un perfil solo
+    // tiene uno de los dos campos NO se produce error (antes, el campo faltante
+    // hacía fallar toda la regla y el directivo recibía "permisos insuficientes").
+    // Un directivo nunca obtiene escritura: los privilegios son solo de lectura.
+    function permisosDe() {
+      let a = profile().get('permisos', []);
+      let b = profile().get('privilegios', []);
+      return (a is list ? a : []).concat(b is list ? b : []);
+    }
+
     function privilege(p) {
       return admin()
-        || (isDirectivo()
-          && (
-            (profile().permisos is list && p in profile().permisos)
-            || (profile().privilegios is list && p in profile().privilegios)
-          ));
+        || (isDirectivo() && p in permisosDe());
+    }
+
+    // Directivo con al menos uno de los privilegios indicados.
+    function anyPriv(ps) {
+      return admin()
+        || (isDirectivo() && permisosDe().hasAny(ps));
     }
 
     function ownDocente(id) {
@@ -88,16 +98,13 @@ service cloud.firestore {
     // Directivo con al menos un privilegio: puede leer los catálogos básicos
     // (docentes, grupos, asignaturas) para mostrar nombres en sus pantallas.
     function hasAnyPrivilege() {
-      return isDirectivo()
-        && ((profile().permisos is list && profile().permisos.size() > 0)
-          || (profile().privilegios is list && profile().privilegios.size() > 0));
+      return isDirectivo() && permisosDe().size() > 0;
     }
 
+    // Datos generales (dashboard): quien ve cualquiera de estos módulos necesita
+    // leer asignaciones, avance, calificaciones y alumnos para poblarlos.
     function canSeeGeneralData() {
-      return privilege('dashboardGeneral')
-        || privilege('docentes')
-        || privilege('cargas')
-        || privilege('avance');
+      return anyPriv(['dashboardGeneral', 'docentes', 'cargas', 'avance', 'asignaciones']);
     }
 
     // ================================================================
@@ -166,12 +173,8 @@ service cloud.firestore {
     // ================================================================
     match /alumnos/{id} {
       allow read: if docente()
-        || (isDirectivo() && (
-          canSeeGeneralData()
-          || privilege('alumnos')
-          || privilege('cargas')
-          || privilege('verAlumno')
-        ))
+        || canSeeGeneralData()
+        || anyPriv(['alumnos', 'verAlumno'])
         || ownAlumno(id);
 
       // El alumno se identifica por el campo correo, que coincide con el id
@@ -193,11 +196,7 @@ service cloud.firestore {
     // ================================================================
     match /asignaciones/{id} {
       allow read: if admin()
-        || (isDirectivo() && (
-          canSeeGeneralData()
-          || privilege('asignaciones')
-          || privilege('cargas')
-        ))
+        || canSeeGeneralData()
         || (docente() && resource.data.docente == em());
 
       allow create: if admin()
@@ -217,11 +216,7 @@ service cloud.firestore {
     // ================================================================
     match /avance/{id} {
       allow read: if admin()
-        || (isDirectivo() && (
-          canSeeGeneralData()
-          || privilege('asignaciones')
-          || privilege('cargas')
-        ))
+        || canSeeGeneralData()
         || (docente() && resource.data.docente == em());
 
       allow create: if admin()
@@ -241,13 +236,9 @@ service cloud.firestore {
     // ================================================================
     match /calificaciones/{id} {
       allow read: if admin()
-        || (isDirectivo() && (
-          canSeeGeneralData()
-          || privilege('asignaciones')
-          || privilege('cargas')
-        ))
+        || canSeeGeneralData()
         || (docente() && resource.data.docente == em())
-        || (isDirectivo() && privilege('verAlumno'))
+        || privilege('verAlumno')
         // Panel del alumno: solo los registros con su correo institucional.
         || (dom() && resource.data.correo == em());
 
