@@ -133,7 +133,7 @@ const bloqueo = m => { main.innerHTML = `<div id="login"><p class="msg">${esc(m)
 function menu() {
   let items;
   if (me.rol === 'admin') {
-    items = [['dashboard', 'Dashboard'], ['importar', 'Cargar reportes'], ['cargasPanel', 'Cargas'], ['asignaciones', 'Asignaciones'], ['avance', 'Avance general'], ...Object.keys(TABS).filter(k => !['asignaciones','avance'].includes(k)).map(k => [k, TABS[k].n])];
+    items = [['dashboard', 'Dashboard'], ['importar', 'Cargar reportes'], ['cargasPanel', 'Cargas'], ['asignaciones', 'Asignaciones'], ['avance', 'Avance general'], ...Object.keys(TABS).filter(k => !['asignaciones','avance'].includes(k)).map(k => [k, TABS[k].n]), ['verAlumno', 'Ver como alumno']];
   } else if (me.rol === 'directivo') {
     items = [['dashboard', 'Dashboard general']];
     if (hasPriv('docentes')) items.push(['docentes', 'Docentes']);
@@ -163,6 +163,7 @@ function ir(k) {
     : k === 'cargasPanel' ? vistaCargasPanel
     : k === 'asignaciones' ? vistaAsignacionesGeneral
     : k === 'avance' ? vistaAvanceGeneral
+    : k === 'verAlumno' ? vistaVerAlumno
     : () => vistaTab(k);
   return Promise.resolve().then(action).catch(e => {
     console.error('Error en la vista', k, e);
@@ -194,10 +195,23 @@ function inferTipo(grupo, grupos) {
   return hit ? String(hit.tipo || '').toUpperCase() : '';
 }
 
-async function obtenerDatosGenerales() {
+// Lee una colección y, si el perfil no tiene permiso sobre ella, devuelve vacío
+// en lugar de romper toda la pantalla (cada rol ve solo lo que le corresponde).
+async function safeDocs(q) {
+  try { return await getDocs(q); }
+  catch (e) { if (e?.code === 'permission-denied') return { docs: [] }; throw e; }
+}
+
+// soloDocente: el docente consulta ÚNICAMENTE sus propios registros (las reglas
+// no le permiten listar colecciones completas).
+async function obtenerDatosGenerales(soloDocente = '') {
+  const propios = col => soloDocente ? query(collection(db, col), where('docente', '==', soloDocente)) : collection(db, col);
+  const vacio = Promise.resolve({ docs: [] });
   const [docs, av, asig, cal, alumnos, grupos, mats] = await Promise.all([
-    getDocs(collection(db, 'docentes')), getDocs(collection(db, 'avance')), getDocs(collection(db, 'asignaciones')),
-    getDocs(collection(db, 'calificaciones')), getDocs(collection(db, 'alumnos')), getDocs(collection(db, 'grupos')), getDocs(collection(db, 'asignaturas'))
+    soloDocente ? vacio : safeDocs(collection(db, 'docentes')),
+    safeDocs(propios('avance')), safeDocs(propios('asignaciones')), safeDocs(propios('calificaciones')),
+    soloDocente ? vacio : safeDocs(collection(db, 'alumnos')),
+    safeDocs(collection(db, 'grupos')), safeDocs(collection(db, 'asignaturas'))
   ]);
   const docentes = docs.docs.map(x => ({id:x.id,...x.data()})).filter(x => ['docente','directivo'].includes(String(x.rol||'').toLowerCase()));
   const avances = av.docs.map(x => ({id:x.id,...x.data()}));
@@ -754,6 +768,17 @@ async function vistaTab(k) {
   main.querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{if(!confirm('¿Borrar este registro?'))return;try{await deleteDoc(doc(db,t.col,b.dataset.del));vistaTab(k);}catch(e){alert('No se pudo borrar: '+e.message);}});
   $('recargar').onclick=()=>vistaTab(k);
   $('buscar').oninput=e=>{const term=e.target.value.toLowerCase();main.querySelectorAll('tbody tr').forEach(tr=>{tr.hidden=!tr.textContent.toLowerCase().includes(term);});};
+  soloLectura();
+}
+
+
+// Los directivos consultan, no editan: se quitan los botones de alta/edición/borrado
+// para que no aparezca "permisos insuficientes" al intentar guardar.
+function soloLectura() {
+  if (me.rol === 'admin') return;
+  main.querySelectorAll('.section-head .actions > *').forEach(x => { if (x.id !== 'actualizarDocs') x.remove(); });
+  main.querySelectorAll('td.actions').forEach(td => td.remove());
+  main.querySelectorAll('thead th').forEach(th => { if (th.textContent.trim() === 'Acciones') th.remove(); });
 }
 
 async function vistaDocentesPanel(){
@@ -807,6 +832,7 @@ async function vistaDocentesPanel(){
     if(!confirm(`¿Eliminar el perfil de ${data.nombre||id}? Esto no elimina sus reportes académicos.`)) return;
     try{await deleteDoc(doc(db,'docentes',id));vistaDocentesPanel();}catch(e){alert('No se pudo eliminar: '+e.message);}
   });
+  soloLectura();
 }
 
 async function editarDocente(correo){
@@ -905,8 +931,29 @@ async function vistaAvanceGeneral(){
   main.querySelectorAll('[data-cascade]').forEach(b=>b.onclick=()=>{const x=main.querySelector(`[data-cascade-detail="${CSS.escape(b.dataset.cascade)}"]`);if(x)x.hidden=!x.hidden;b.classList.toggle('expanded',x?!x.hidden:false);});
 }
 
+async function vistaVerAlumno() {
+  let lista = [];
+  try { lista = (await getDocs(collection(db, 'alumnos'))).docs.map(d => ({ id: d.id, ...d.data() })); } catch (_) {}
+  lista.sort((a, b) => sortText(a.nombre || a.correo || a.id, b.nombre || b.correo || b.id));
+  main.innerHTML = `<div class="section-head"><div><h2>Ver como alumno</h2><p>Escribe el correo institucional del alumno (o elígelo de la lista) para abrir su panel tal como lo ve al iniciar sesión.</p></div></div>
+    <div class="editor">
+      <div class="form-grid"><label>Correo del alumno<input id="vaCorreo" list="vaLista" placeholder="alumno@${DOMINIO}" autocomplete="off"></label></div>
+      <datalist id="vaLista">${lista.map(a => `<option value="${esc(a.correo || a.id)}">${esc([a.nombre, a.grupoEspanol, a.grupoIngles].filter(Boolean).join(' · '))}</option>`).join('')}</datalist>
+      <div class="actions"><button class="p" id="vaIr" type="button">Ver panel del alumno</button></div>
+      <p class="msg" id="vaMsg" hidden></p>
+    </div>`;
+  const abrir = () => {
+    const correo = normEmail($('vaCorreo').value), msg = $('vaMsg');
+    if (!correo.endsWith('@' + DOMINIO)) { msg.textContent = `Escribe un correo @${DOMINIO}.`; msg.hidden = false; return; }
+    msg.hidden = true;
+    window.open('/alumnos/?ver=' + encodeURIComponent(correo), '_blank');
+  };
+  $('vaIr').onclick = abrir;
+  $('vaCorreo').onkeydown = e => { if (e.key === 'Enter') abrir(); };
+}
+
 async function obtenerMisDatos(){
-  const d=await obtenerDatosGenerales();
+  const d=await obtenerDatosGenerales(me.email);
   const asignaciones=d.asignacionesVisibles.filter(r=>normEmail(r.docente)===normEmail(me.email));
   const cargas=d.cargas.filter(r=>normEmail(r.docente)===normEmail(me.email));
   const porClave=new Map();
