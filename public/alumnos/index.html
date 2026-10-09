@@ -50,6 +50,8 @@
   <script type="module" src="/alumnos/alumno.js"></script>
   <script>
     if ('serviceWorker' in navigator) {
+      const teniaSW = !!navigator.serviceWorker.controller;
+      navigator.serviceWorker.addEventListener('controllerchange', () => { if (teniaSW && !window.__recargado) { window.__recargado = true; location.reload(); } });
       window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
     }
     let deferredInstallPrompt = null;
