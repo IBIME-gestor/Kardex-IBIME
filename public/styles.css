@@ -1408,3 +1408,6 @@ body:not(:has(#login)) .install-btn:hover{
 
 .sync-aviso{display:flex;justify-content:space-between;align-items:center;gap:12px 18px;flex-wrap:wrap;background:#fff6dc;border:1px solid #f2d98a;color:#6f4a05;border-radius:14px;padding:12px 16px;margin:0 0 16px;font-size:13.5px}
 .sync-aviso button{white-space:nowrap}
+
+.diag{font-size:11.5px;color:#718093;overflow-wrap:anywhere;background:#f1f5f9;border-radius:10px;padding:8px 10px;margin:10px auto 14px;max-width:640px}
+.perm-nota{font-size:12.5px;color:#e0eef8;margin:0 0 12px}
