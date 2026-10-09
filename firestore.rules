@@ -73,6 +73,18 @@ service cloud.firestore {
       return dom() && em() == id.lower();
     }
 
+    // El alumno solo puede consultar lo que está ligado a su propio correo
+    // institucional (id del documento en /alumnos y campo correo en calificaciones).
+    function ownAlumno(id) {
+      return dom() && em() == id.lower();
+    }
+
+    // Un correo que ya está dado de alta como alumno no puede autoregistrarse
+    // como docente desde el portal de docentes.
+    function esAlumnoRegistrado() {
+      return exists(/databases/$(db)/documents/alumnos/$(em()));
+    }
+
     function canSeeGeneralData() {
       return privilege('dashboardGeneral')
         || privilege('docentes')
@@ -88,10 +100,15 @@ service cloud.firestore {
         || (isDirectivo() && canSeeGeneralData())
         || ownDocente(id);
 
+      // El alumno consulta (solo por id, sin listar) nombre y foto de sus
+      // docentes para identificarlos en su panel.
+      allow get: if dom();
+
       // Permite que un docente cree su propio perfil al iniciar sesión por
       // primera vez. El administrador puede crear/editar cualquier perfil.
       allow create: if admin()
         || (ownDocente(id)
+          && !esAlumnoRegistrado()
           && request.resource.data.correo == em()
           && request.resource.data.rol is string
           && request.resource.data.rol.lower() == 'docente');
@@ -143,7 +160,8 @@ service cloud.firestore {
           canSeeGeneralData()
           || privilege('alumnos')
           || privilege('cargas')
-        ));
+        ))
+        || ownAlumno(id);
 
       // El alumno se identifica por el campo correo, que coincide con el id
       // del documento. No se exige ultimoDocente para permitir que un mismo
@@ -213,7 +231,9 @@ service cloud.firestore {
           || privilege('asignaciones')
           || privilege('cargas')
         ))
-        || (docente() && resource.data.docente == em());
+        || (docente() && resource.data.docente == em())
+        // Panel del alumno: solo los registros con su correo institucional.
+        || (dom() && resource.data.correo == em());
 
       allow create: if admin()
         || (docente()
