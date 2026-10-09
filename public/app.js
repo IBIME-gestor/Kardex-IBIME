@@ -3,7 +3,7 @@ import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChang
 import { getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, query, where, writeBatch, serverTimestamp, arrayUnion, getCountFromServer } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 import { CONFIG, BRIDGE_URL, ADMIN_EMAIL, DOMINIO } from './config.js';
 
-const APP_VERSION = '2026.10.09-r6';
+const APP_VERSION = '2026.10.09-r7';
 const app = initializeApp(CONFIG), auth = getAuth(app), db = getFirestore(app);
 const $ = id => document.getElementById(id), main = $('main');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -814,6 +814,34 @@ function renderBulkEditor(k, rows, existing) {
   };
 }
 
+// ---------- Filtros de alumnos (grado / grupo) ----------
+// Grado = primer número del nombre del grupo (p. ej. "1° AQUA" → 1).
+const gradoDe = g => { const m = String(g || '').match(/\d+/); return m ? m[0] : ''; };
+const gruposAlumno = a => [...new Set([a.grupoEspanol, a.grupoIngles, ...(Array.isArray(a.grupos) ? a.grupos : [])]
+  .map(x => normalizarCatalogo('grupos', x)).filter(Boolean))];
+const gradosAlumno = a => [...new Set(gruposAlumno(a).map(gradoDe).filter(Boolean))];
+const gradosDe = lista => [...new Set(lista.flatMap(gradosAlumno))].sort(sortText);
+const gruposDeLista = (lista, grado = '') => [...new Set(lista.flatMap(gruposAlumno).filter(g => !grado || gradoDe(g) === grado))].sort(sortText);
+const coincideAlumno = (a, { term = '', grado = '', grupo = '' }) => {
+  if (grado && !gradosAlumno(a).includes(grado)) return false;
+  if (grupo && !gruposAlumno(a).includes(grupo)) return false;
+  if (!term) return true;
+  const t = term.toLowerCase();
+  return [a.nombre, a.correo || a.id, a.matricula, a.tutor, ...gruposAlumno(a)].some(x => String(x || '').toLowerCase().includes(t));
+};
+// Selects de grado y grupo enlazados (el grupo se limita al grado elegido).
+function enlazarFiltrosAlumnos(lista, selGrado, selGrupo, alCambiar) {
+  const pintarGrupos = () => {
+    const actual = selGrupo.value;
+    const gs = gruposDeLista(lista, selGrado.value);
+    selGrupo.innerHTML = `<option value="">Todos los grupos</option>${options(gs, gs.includes(actual) ? actual : '')}`;
+  };
+  selGrado.innerHTML = `<option value="">Todos los grados</option>${gradosDe(lista).map(g => `<option value="${esc(g)}">${esc(g)}°</option>`).join('')}`;
+  pintarGrupos();
+  selGrado.onchange = () => { pintarGrupos(); alCambiar(); };
+  selGrupo.onchange = alCambiar;
+}
+
 async function vistaTab(k) {
   if (k === 'docentes') return vistaDocentesPanel();
   const t=TABS[k];
@@ -828,8 +856,8 @@ async function vistaTab(k) {
   const bulk=esCargaMasiva(k), alumnoBulk=k==='alumnos', docenteBulk=k==='docentes';
   main.innerHTML=`<div class="section-head"><div><h2>${t.n}</h2><p>${bulk ? (alumnoBulk ? 'Carga tu Excel o descarga la plantilla oficial. Revisa todos los alumnos antes de guardarlos.' : 'Agrega una por una o pega directamente varias filas copiadas de Google Sheets. Revisa todo antes de guardar.') : 'Agrega, edita y completa la información. Los cambios se guardan en Firestore.'}</p></div><div class="actions"><button class="p" id="nuevo">+ Nuevo</button>${alumnoBulk ? '<button id="plantillaAlumnos">DESCARGAR PLANTILLA EXCEL</button><label class="button-file" for="excelAlumnos">SUBIR EXCEL</label><input id="excelAlumnos" type="file" accept=".xlsx,.xls" hidden>' : bulk ? '<button id="pegarMasivo">Pegar desde Sheets</button>' : ''}</div></div>
     ${bulk ? `<div id="bulkPaste" class="bulk-paste" hidden><label>${alumnoBulk ? 'También puedes pegar las 6 columnas desde Excel/Sheets' : docenteBulk ? 'Pega hasta 50 docentes desde Google Sheets' : 'Pega aquí las filas copiadas de Google Sheets'}<textarea id="pasteArea" rows="7" placeholder="${alumnoBulk ? 'MATRICULA<TAB>NOMBRE<TAB>CORREO<TAB>GRUPO ESPAÑOL<TAB>GRUPO INGLES<TAB>TUTOR' : docenteBulk ? 'CORREO<TAB>NOMBRE<TAB>ROL<TAB>FOTO URL\nprofesor@ibime.edu.mx<TAB>Nombre<TAB>docente' : k === 'asignaturas' ? 'Materia<TAB>Tipo\nMATEMÁTICAS<TAB>ESPAÑOL\nENGLISH<TAB>INGLES' : 'Grupo\n1A\n1B\n2A'}"></textarea></label><div class="actions"><button id="procesarPegado" class="p">PREVISUALIZAR FILAS</button><button id="cancelarPegado">Cancelar</button></div></div><div id="bulkEditor" class="editor" hidden></div>` : '<div id="editor" class="editor" hidden></div>'}
-    <div class="tools"><input id="buscar" placeholder="Buscar..."><button id="recargar">Actualizar</button></div>
-    <div class="table-wrap catalog-table"><table><thead><tr>${t.f.map(f=>`<th>${f}</th>`).join('')}<th>Acciones</th></tr></thead><tbody>${rows.map(r=>`<tr>${t.f.map(f=>`<td>${esc(Array.isArray(r[f])?r[f].join(', '):r[f])}</td>`).join('')}<td class="actions"><button data-edit="${esc(r.id)}">Editar</button><button class="danger" data-del="${esc(r.id)}">Borrar</button></td></tr>`).join('')||'<tr><td colspan="20" class="empty">No hay registros.</td></tr>'}</tbody></table></div>`;
+    <div class="tools"><input id="buscar" placeholder="${k==='alumnos' ? 'Buscar por nombre, matrícula, correo o tutor...' : 'Buscar...'}">${k==='alumnos' ? '<select id="fGrado" aria-label="Grado"></select><select id="fGrupo" aria-label="Grupo"></select>' : ''}<button id="recargar">Actualizar</button></div>${k==='alumnos' ? '<p class="filtro-cuenta" id="fCuenta"></p>' : ''}
+    <div class="table-wrap catalog-table"><table><thead><tr>${t.f.map(f=>`<th>${f}</th>`).join('')}<th>Acciones</th></tr></thead><tbody>${rows.map(r=>`<tr${k==='alumnos' ? ` data-i="${esc(r.id)}"` : ''}>${t.f.map(f=>`<td>${esc(Array.isArray(r[f])?r[f].join(', '):r[f])}</td>`).join('')}<td class="actions"><button data-edit="${esc(r.id)}">Editar</button><button class="danger" data-del="${esc(r.id)}">Borrar</button></td></tr>`).join('')||'<tr><td colspan="20" class="empty">No hay registros.</td></tr>'}</tbody></table></div>`;
 
   const editor=$('editor');
   const openEditor=(data={})=>{
@@ -863,7 +891,19 @@ async function vistaTab(k) {
   main.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openEditor(rows.find(r=>r.id===b.dataset.edit)));
   main.querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{if(!confirm('¿Borrar este registro?'))return;invalidar();try{await deleteDoc(doc(db,t.col,b.dataset.del));vistaTab(k);}catch(e){alert('No se pudo borrar: '+e.message);}});
   $('recargar').onclick=()=>vistaTab(k);
-  $('buscar').oninput=e=>{const term=e.target.value.toLowerCase();main.querySelectorAll('tbody tr').forEach(tr=>{tr.hidden=!tr.textContent.toLowerCase().includes(term);});};
+  if (k==='alumnos') {
+    const porId=new Map(rows.map(r=>[r.id,r]));
+    const aplicar=()=>{
+      const f={term:$('buscar').value.trim(),grado:$('fGrado').value,grupo:$('fGrupo').value};
+      let n=0;
+      main.querySelectorAll('tbody tr[data-i]').forEach(tr=>{const ok=coincideAlumno(porId.get(tr.dataset.i)||{},f);tr.hidden=!ok;if(ok)n++;});
+      $('fCuenta').textContent=`Mostrando ${n} de ${rows.length} alumnos`;
+    };
+    enlazarFiltrosAlumnos(rows,$('fGrado'),$('fGrupo'),aplicar);
+    $('buscar').oninput=aplicar; aplicar();
+  } else {
+    $('buscar').oninput=e=>{const term=e.target.value.toLowerCase();main.querySelectorAll('tbody tr').forEach(tr=>{tr.hidden=!tr.textContent.toLowerCase().includes(term);});};
+  }
   soloLectura();
 }
 
@@ -1031,21 +1071,36 @@ async function vistaAvanceGeneral(){
 }
 
 async function vistaVerAlumno() {
-  let lista = [];
-  try { lista = (await getDocs(collection(db, 'alumnos'))).docs.map(d => ({ id: d.id, ...d.data() })); } catch (_) {}
+  let lista = [], sinPermiso = false;
+  try { lista = (await getDocs(collection(db, 'alumnos'))).docs.map(d => ({ id: d.id, ...d.data() })); }
+  catch (e) { sinPermiso = e?.code === 'permission-denied'; console.warn('No se pudo leer alumnos', e); }
   lista.sort((a, b) => sortText(a.nombre || a.correo || a.id, b.nombre || b.correo || b.id));
-  main.innerHTML = `<div class="section-head"><div><h2>Ver como alumno</h2><p>Escribe el correo institucional del alumno (o elígelo de la lista) para abrir su panel tal como lo ve al iniciar sesión.</p></div></div>
+  const MAX = 100;
+  main.innerHTML = `<div class="section-head"><div><h2>Ver como alumno</h2><p>Busca al alumno por nombre, matrícula o correo, filtra por grado y grupo, y ábrelo para ver su panel tal como lo ve al iniciar sesión.</p></div></div>
     <div class="editor">
-      <div class="form-grid"><label>Correo del alumno<input id="vaCorreo" list="vaLista" placeholder="alumno@${DOMINIO}" autocomplete="off"></label></div>
-      <datalist id="vaLista">${lista.map(a => `<option value="${esc(a.correo || a.id)}">${esc([a.nombre, a.grupoEspanol, a.grupoIngles].filter(Boolean).join(' · '))}</option>`).join('')}</datalist>
+      ${sinPermiso ? `<p class="msg">Tu perfil no puede leer la lista de alumnos. Puedes escribir el correo manualmente.</p>` : ''}
+      <div class="tools va-filtros"><input id="vaBuscar" placeholder="Buscar nombre, matrícula o correo..." autocomplete="off"><select id="vaGrado" aria-label="Grado"></select><select id="vaGrupo" aria-label="Grupo"></select></div>
+      <p class="filtro-cuenta" id="vaCuenta"></p>
+      <div class="va-lista" id="vaLista"></div>
+      <div class="form-grid"><label>O escribe el correo del alumno<input id="vaCorreo" placeholder="alumno@${DOMINIO}" autocomplete="off"></label></div>
       <div class="actions"><button class="p" id="vaIr" type="button">Ver panel del alumno</button></div>
       <p class="msg" id="vaMsg" hidden></p>
     </div>`;
+  const abrirCorreo = c => window.open('/alumnos/?ver=' + encodeURIComponent(normEmail(c)), '_blank');
+  const pintar = () => {
+    const f = { term: $('vaBuscar').value.trim(), grado: $('vaGrado').value, grupo: $('vaGrupo').value };
+    const hits = lista.filter(a => coincideAlumno(a, f));
+    $('vaCuenta').textContent = lista.length ? `${hits.length} de ${lista.length} alumnos${hits.length > MAX ? ` · mostrando los primeros ${MAX}, afina la búsqueda` : ''}` : '';
+    $('vaLista').innerHTML = hits.slice(0, MAX).map(a => `<button type="button" class="va-item" data-correo="${esc(a.correo || a.id)}"><strong>${esc(a.nombre || a.correo || a.id)}</strong><span>${esc(a.correo || a.id)}</span><small>${esc([a.matricula, ...gruposAlumno(a)].filter(Boolean).join(' · '))}</small></button>`).join('')
+      || (lista.length ? '<div class="empty">Ningún alumno coincide con la búsqueda.</div>' : '');
+    $('vaLista').querySelectorAll('.va-item').forEach(b => b.onclick = () => abrirCorreo(b.dataset.correo));
+  };
+  enlazarFiltrosAlumnos(lista, $('vaGrado'), $('vaGrupo'), pintar);
+  $('vaBuscar').oninput = pintar; pintar();
   const abrir = () => {
     const correo = normEmail($('vaCorreo').value), msg = $('vaMsg');
     if (!correo.endsWith('@' + DOMINIO)) { msg.textContent = `Escribe un correo @${DOMINIO}.`; msg.hidden = false; return; }
-    msg.hidden = true;
-    window.open('/alumnos/?ver=' + encodeURIComponent(correo), '_blank');
+    msg.hidden = true; abrirCorreo(correo);
   };
   $('vaIr').onclick = abrir;
   $('vaCorreo').onkeydown = e => { if (e.key === 'Enter') abrir(); };
