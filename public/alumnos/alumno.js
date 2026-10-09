@@ -79,7 +79,11 @@ function verOtro() {
 }
 const esAdminCuenta = async email => {
   if (email === normEmail(ADMIN_EMAIL)) return true;
-  try { const s = await getDoc(doc(db, 'docentes', email)); return String(s.data()?.rol || '').toLowerCase() === 'admin'; }
+  try {
+    const d = (await getDoc(doc(db, 'docentes', email))).data() || {};
+    const rol = String(d.rol || '').toLowerCase(), permisos = Array.isArray(d.permisos) ? d.permisos : (Array.isArray(d.privilegios) ? d.privilegios : []);
+    return d.bloqueado !== true && (rol === 'admin' || (rol === 'directivo' && permisos.includes('verAlumno')));
+  }
   catch (_) { return false; }
 };
 
@@ -116,7 +120,7 @@ onAuthStateChanged(auth, async u => {
   }
   main.innerHTML = '<div class="al-card al-loading"><div class="spin" aria-hidden="true"></div><p>Cargando tus calificaciones…</p></div>';
   try {
-    await u.getIdToken(true);
+    await u.getIdToken(); // usa el token guardado; solo va a la red si ya venció
     // Vista de administrador: /alumnos/?ver=correo@ibime.edu.mx
     const ver = normEmail(new URLSearchParams(location.search).get('ver'));
     const vistaAdmin = !!ver && await esAdminCuenta(email);
@@ -126,8 +130,11 @@ onAuthStateChanged(auth, async u => {
     pintar();
   } catch (e) {
     console.error('Panel alumno', e);
-    main.innerHTML = `<div class="al-card al-error"><h3>No se pudo cargar tu información</h3>
-      <p>${esc(e.code || '')} ${esc(e.message || '')}</p>
+    const sinRed = e?.code === 'auth/network-request-failed' || e?.code === 'unavailable' || !navigator.onLine;
+    main.innerHTML = `<div class="al-card al-error"><h3>${sinRed ? 'No hay conexión con Google' : 'No se pudo cargar tu información'}</h3>
+      <p>${sinRed
+        ? 'Tu dispositivo no pudo comunicarse con los servidores de Google. Revisa tu internet, desactiva VPN o bloqueadores de anuncios y vuelve a intentarlo.'
+        : `${esc(e.code || '')} ${esc(e.message || '')}`}</p>
       <button id="reintentar" class="p" type="button">Reintentar</button></div>`;
     $('reintentar').onclick = () => location.reload();
   }
@@ -205,7 +212,7 @@ function pintar() {
   const dato = (et, v) => v ? `<div class="al-dato"><small>${et}</small><b>${esc(v)}</b></div>` : '';
   const barra = estado.vistaAdmin ? `
     <div class="al-admin-bar">
-      <span><b>Vista de administrador</b> · Estás viendo el panel de <strong>${esc(perfil.email)}</strong> tal como lo ve el alumno.</span>
+      <span><b>Vista de administración</b> · Estás viendo el panel de <strong>${esc(perfil.email)}</strong> tal como lo ve el alumno.</span>
       <span class="al-admin-ctl">
         <input id="verCorreo" type="email" placeholder="otro@${DOMINIO}" autocomplete="off" aria-label="Correo de otro alumno">
         <button type="button" id="verIr">Ver</button>
