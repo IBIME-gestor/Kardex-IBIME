@@ -1,1 +1,10 @@
-{ "hosting": { "public": "public" }, "firestore": { "rules": "firestore.rules" } }
+{
+  "hosting": {
+    "public": "public",
+    "headers": [
+      { "source": "**/*.@(js|html|css|webmanifest)", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] },
+      { "source": "/sw.js", "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }] }
+    ]
+  },
+  "firestore": { "rules": "firestore.rules" }
+}
