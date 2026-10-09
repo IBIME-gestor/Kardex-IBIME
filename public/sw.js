@@ -1,4 +1,4 @@
-const CACHE = 'ibime-kardex-v9';
+const CACHE = 'ibime-kardex-v10';
 const APP_SHELL = [
   './', './index.html', './styles.css', './app.js', './config.js', './manifest.webmanifest',
   './alumnos/', './alumnos/index.html', './alumnos/alumno.js', './alumnos/alumno.css', './alumnos/manifest.webmanifest',
